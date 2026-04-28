@@ -28,6 +28,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "chardev/char-fe.h"
+#include "hw/xtensa/esp32s3_elf_hooks.h"
 #include "exec/helper-proto.h"
 #include "semihosting/semihost.h"
 #include "qapi/error.h"
@@ -192,6 +193,30 @@ void HELPER(simcall)(CPUXtensaState *env)
 {
     CPUState *cs = env_cpu(env);
     uint32_t *regs = env->regs;
+
+    /*
+     * Check if this SIMCALL is from an ELF-patched function trampoline.
+     * The trampoline writes ENTRY(3 bytes) + SIMCALL(3 bytes) + RETW(3 bytes).
+     * So when SIMCALL fires, PC points to the instruction AFTER SIMCALL,
+     * i.e., PC = function_addr + 6 (the RETW instruction).
+     * The SIMCALL itself was at PC - 3 = function_addr + 3.
+     */
+    if (esp32s3_elf_hooks_global) {
+        Esp32s3ElfHookEntry *hook = esp32s3_elf_hooks_lookup(
+            esp32s3_elf_hooks_global, env->pc - 3);
+        if (hook && hook->handler) {
+            Esp32s3ElfHookRegs hook_regs = {
+                .regs = env->regs,
+                .cpu_state = cs,
+                .pc = env->pc,
+            };
+            bool need_exit = hook->handler(&hook_regs, hook->opaque);
+            if (need_exit) {
+                cpu_loop_exit(cs);
+            }
+            return;
+        }
+    }
 
     switch (regs[2]) {
     case TARGET_SYS_exit:

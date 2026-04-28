@@ -75,6 +75,8 @@
 #include "hw/audio/es8311.h"
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/misc/esp32s3_wifi.h"
+#include "hw/misc/esp32s3_ble.h"
+#include "hw/xtensa/esp32s3_elf_hooks.h"
 
 #define TYPE_ESP32S3_SOC "xtensa.esp32s3"
 #define ESP32S3_SOC(obj) OBJECT_CHECK(Esp32s3SocState, (obj), TYPE_ESP32S3_SOC)
@@ -168,6 +170,9 @@ typedef struct Esp32s3SocState {
 
     /* WiFi register stubs */
     Esp32s3WifiState wifi;
+
+    /* BLE bridge */
+    Esp32s3BleState ble;
 
     MemoryRegion iomem;
     DWCSDMMCState sdmmc;
@@ -666,6 +671,7 @@ static void esp32s3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(ss), "i2c1", &ss->i2c[1], TYPE_ESP32_I2C);
     object_initialize_child(OBJECT(ss), "rng", &ss->rng, TYPE_ESP32S3_RNG);
     object_initialize_child(OBJECT(ss), "wifi", &ss->wifi, TYPE_ESP32S3_WIFI);
+    object_initialize_child(OBJECT(ss), "ble", &ss->ble, TYPE_ESP32S3_BLE);
 
     object_initialize_child(OBJECT(ss), "clock", &ss->clock, TYPE_ESP32S3_CLOCK);
 
@@ -987,6 +993,14 @@ static void esp32s3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, ESP32S3_WDEV_BASE, mr, 0);
     }
 
+    /* BLE bridge at DR_REG_BT_BASE (0x60011000) */
+    {
+        ss->ble.cpu = &ss->cpu[0];
+        sysbus_realize(SYS_BUS_DEVICE(&ss->ble), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->ble), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_BT_BASE, mr, 0);
+    }
+
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.iomux", DR_REG_IO_MUX_BASE, 0x2000);
 
@@ -1008,16 +1022,33 @@ static void esp32s3_machine_init(MachineState *machine)
     }
 
     if (load_elf_filename) {
+        /*
+         * Set up ELF hooks for BLE (NimBLE) API interception.
+         * The hooks register function names to look for in the ELF symbol
+         * table. When found, the entry points are patched with SIMCALL
+         * trampolines that redirect to our host-side handlers.
+         */
+        Esp32s3ElfHooks *elf_hooks = esp32s3_elf_hooks_new();
+        esp32s3_elf_hooks_global = elf_hooks;
+        esp32s3_ble_register_hooks(&ss->ble, elf_hooks);
+
         uint64_t elf_entry;
         uint64_t elf_lowaddr;
-        int size = load_elf(load_elf_filename, NULL,
+
+        /* Use load_elf_ram_sym to get symbol table access for function hooking */
+        int size = load_elf_ram_sym(load_elf_filename, NULL,
                                translate_phys_addr, &ss->cpu[0],
                                &elf_entry, &elf_lowaddr,
-                               NULL, NULL, 0, EM_XTENSA, 0, 0);
+                               NULL, NULL, 0, EM_XTENSA, 0, 0,
+                               CPU(&ss->cpu[0])->as, true,
+                               esp32s3_elf_hooks_symbol_cb);
         if (size < 0) {
             error_report("Error: could not load ELF file '%s'", load_elf_filename);
             exit(1);
         }
+
+        /* Patch matched function entry points with SIMCALL trampolines */
+        esp32s3_elf_hooks_patch(elf_hooks, &ss->cpu[0]);
 
         if (elf_entry != XCHAL_RESET_VECTOR_PADDR) {
             // Since ROM is empty when loading elf file AND

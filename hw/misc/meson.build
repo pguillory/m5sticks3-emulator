@@ -169,8 +169,15 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
   'esp32s3_pms.c',
   'esp_hmac.c',
   'esp32s3_hmac.c',
-  'esp32s3_wifi.c'
+  'esp32s3_wifi.c',
+  'esp32s3_ble.c',
 ))
+if host_os == 'darwin'
+  corebluetooth = dependency('appleframeworks', modules: 'CoreBluetooth',
+                             required: true)
+  system_ss.add(when: 'CONFIG_XTENSA_ESP32S3',
+                if_true: [files('esp32s3_ble_darwin.m'), corebluetooth])
+endif
 
 if gcrypt.found()
   system_ss.add(when: [gcrypt, 'CONFIG_XTENSA_ESP32'], if_true: files(
