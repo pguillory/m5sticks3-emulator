@@ -56,6 +56,22 @@ REG32(GPIO_PCPU_NMI_INT1,0x006C)
 /* GPIO I/O region size: covers up to FUNC_OUT_SEL for 49 pins */
 #define ESP32_GPIO_IO_SIZE      0x0700
 
+/* Per-pin register bit definitions (GPIO_PINn_REG) */
+#define GPIO_PIN_PAD_DRIVER_BIT     2
+#define GPIO_PIN_INT_TYPE_SHIFT     7
+#define GPIO_PIN_INT_TYPE_MASK      (0x7 << GPIO_PIN_INT_TYPE_SHIFT)
+#define GPIO_PIN_WAKEUP_ENABLE_BIT  10
+#define GPIO_PIN_INT_ENA_SHIFT      13
+#define GPIO_PIN_INT_ENA_MASK       (0x1F << GPIO_PIN_INT_ENA_SHIFT)
+
+/* Interrupt type values (GPIO_PINn_INT_TYPE field) */
+#define GPIO_INT_TYPE_DISABLE       0
+#define GPIO_INT_TYPE_RISING        1
+#define GPIO_INT_TYPE_FALLING       2
+#define GPIO_INT_TYPE_ANY_EDGE      3
+#define GPIO_INT_TYPE_LOW_LEVEL     4
+#define GPIO_INT_TYPE_HIGH_LEVEL    5
+
 
 typedef struct Esp32GpioState {
     SysBusDevice parent_obj;
@@ -72,8 +88,8 @@ typedef struct Esp32GpioState {
     uint32_t gpio_out1;     /* GPIO 32-48 output value */
     uint32_t gpio_enable;   /* GPIO 0-31 output enable */
     uint32_t gpio_enable1;  /* GPIO 32-48 output enable */
-    uint32_t gpio_in;       /* GPIO 0-31 input value */
-    uint32_t gpio_in1;      /* GPIO 32-48 input value */
+    uint32_t gpio_in;       /* GPIO 0-31 input value (external signals) */
+    uint32_t gpio_in1;      /* GPIO 32-48 input value (external signals) */
     uint32_t gpio_status;   /* GPIO 0-31 interrupt status */
     uint32_t gpio_status1;  /* GPIO 32-48 interrupt status */
 
@@ -89,3 +105,14 @@ typedef struct Esp32GpioState {
 typedef struct Esp32GpioClass {
     SysBusDeviceClass parent_class;
 } Esp32GpioClass;
+
+/**
+ * Set the level of a GPIO input pin programmatically.
+ * This is the primary injection mechanism for buttons, sensors, etc.
+ * Evaluates interrupt conditions and fires the GPIO IRQ if triggered.
+ *
+ * @param s     GPIO device state
+ * @param pin   GPIO pin number (0-48)
+ * @param level Pin level: 1 = HIGH, 0 = LOW
+ */
+void esp32_gpio_set_pin_level(Esp32GpioState *s, int pin, int level);

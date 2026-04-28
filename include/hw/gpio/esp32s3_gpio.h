@@ -13,6 +13,10 @@
 /* Bootstrap options for ESP32-S3 (4-bit) */
 #define ESP32S3_STRAP_MODE_FLASH_BOOT 0x4   /* SPI Boot */
 
+/* M5StickS3 button GPIO assignments (active-low with pull-up) */
+#define M5STICKS3_BTN_KEY1_GPIO     11  /* Front blue button (KEY1/BtnA) */
+#define M5STICKS3_BTN_KEY2_GPIO     12  /* Side button (KEY2/BtnB) */
+
 typedef struct ESP32S3State {
     Esp32GpioState parent;
 } ESP32S3GPIOState;

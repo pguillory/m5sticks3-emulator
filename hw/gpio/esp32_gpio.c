@@ -5,7 +5,7 @@
  * Copyright (c) 2026 M5StickS3 Emulator contributors
  *
  * Full GPIO register emulation: output, input, enable, per-pin config,
- * and output state observable by connected QEMU devices.
+ * interrupt generation, and injectable input pin state.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -48,6 +48,165 @@ static void esp32_gpio_notify_outputs(Esp32GpioState *s,
 }
 
 
+/*
+ * Re-evaluate the aggregate GPIO interrupt line.
+ * Raises the IRQ if any pin has both a pending status bit and its
+ * interrupt enable bits set; lowers it otherwise.
+ */
+static void esp32_gpio_update_irq(Esp32GpioState *s)
+{
+    bool pending = false;
+
+    for (int pin = 0; pin < ESP32_GPIO_MAX_COUNT; pin++) {
+        uint32_t cfg = s->pin_reg[pin];
+        int int_ena = (cfg & GPIO_PIN_INT_ENA_MASK) >> GPIO_PIN_INT_ENA_SHIFT;
+        if (int_ena == 0) {
+            continue;
+        }
+
+        uint32_t status_bit;
+        if (pin < 32) {
+            status_bit = s->gpio_status & (1u << pin);
+        } else {
+            status_bit = s->gpio_status1 & (1u << (pin - 32));
+        }
+
+        if (status_bit) {
+            pending = true;
+            break;
+        }
+    }
+
+    if (pending) {
+        qemu_irq_raise(s->irq);
+    } else {
+        qemu_irq_lower(s->irq);
+    }
+}
+
+
+/*
+ * Evaluate interrupt condition for a single pin after its input level changed.
+ * Sets the corresponding status bit and calls update_irq if triggered.
+ */
+static void esp32_gpio_eval_pin_interrupt(Esp32GpioState *s, int pin,
+                                          bool old_level, bool new_level)
+{
+    uint32_t cfg = s->pin_reg[pin];
+    int int_type = (cfg & GPIO_PIN_INT_TYPE_MASK) >> GPIO_PIN_INT_TYPE_SHIFT;
+    int int_ena = (cfg & GPIO_PIN_INT_ENA_MASK) >> GPIO_PIN_INT_ENA_SHIFT;
+
+    if (int_type == GPIO_INT_TYPE_DISABLE || int_ena == 0) {
+        return;
+    }
+
+    bool triggered = false;
+
+    switch (int_type) {
+    case GPIO_INT_TYPE_RISING:
+        triggered = !old_level && new_level;
+        break;
+    case GPIO_INT_TYPE_FALLING:
+        triggered = old_level && !new_level;
+        break;
+    case GPIO_INT_TYPE_ANY_EDGE:
+        triggered = (old_level != new_level);
+        break;
+    case GPIO_INT_TYPE_LOW_LEVEL:
+        triggered = !new_level;
+        break;
+    case GPIO_INT_TYPE_HIGH_LEVEL:
+        triggered = !!new_level;
+        break;
+    }
+
+    if (triggered) {
+        if (pin < 32) {
+            s->gpio_status |= (1u << pin);
+        } else {
+            s->gpio_status1 |= (1u << (pin - 32));
+        }
+        esp32_gpio_update_irq(s);
+    }
+}
+
+
+/*
+ * Get the current input level of a pin (what GPIO_IN would report for it).
+ * Output-enabled pins reflect the output register; input pins reflect
+ * the externally driven level stored in gpio_in/gpio_in1.
+ */
+static inline bool esp32_gpio_get_pin_level(Esp32GpioState *s, int pin)
+{
+    if (pin < 32) {
+        if (s->gpio_enable & (1u << pin)) {
+            return (s->gpio_out >> pin) & 1;
+        }
+        return (s->gpio_in >> pin) & 1;
+    } else {
+        int bit = pin - 32;
+        if (s->gpio_enable1 & (1u << bit)) {
+            return (s->gpio_out1 >> bit) & 1;
+        }
+        return (s->gpio_in1 >> bit) & 1;
+    }
+}
+
+
+/*
+ * Handler for qdev_init_gpio_in_named("gpio-in").
+ * Called when another QEMU device drives a GPIO input line.
+ */
+static void esp32_gpio_input_handler(void *opaque, int line, int level)
+{
+    Esp32GpioState *s = ESP32_GPIO(opaque);
+    esp32_gpio_set_pin_level(s, line, level);
+}
+
+
+/*
+ * Public API: set the level of a GPIO input pin.
+ * Updates the internal input register and evaluates interrupt conditions.
+ */
+void esp32_gpio_set_pin_level(Esp32GpioState *s, int pin, int level)
+{
+    if (pin < 0 || pin >= ESP32_GPIO_MAX_COUNT) {
+        warn_report("[GPIO] set_pin_level: pin %d out of range", pin);
+        return;
+    }
+
+    bool old_level = esp32_gpio_get_pin_level(s, pin);
+
+    /* Update the external input register */
+    if (pin < 32) {
+        if (level) {
+            s->gpio_in |= (1u << pin);
+        } else {
+            s->gpio_in &= ~(1u << pin);
+        }
+    } else {
+        int bit = pin - 32;
+        if (level) {
+            s->gpio_in1 |= (1u << bit);
+        } else {
+            s->gpio_in1 &= ~(1u << bit);
+        }
+    }
+
+    bool new_level = esp32_gpio_get_pin_level(s, pin);
+
+#if GPIO_DEBUG
+    info_report("[GPIO] Pin %d: %d -> %d (input set to %d)",
+                pin, old_level, new_level, level);
+#endif
+
+    /* Evaluate interrupt if the effective level changed */
+    if (old_level != new_level) {
+        esp32_gpio_eval_pin_interrupt(s, pin, old_level, new_level);
+    }
+}
+
+
 static uint64_t esp32_gpio_read(void *opaque, hwaddr addr, unsigned int size)
 {
     Esp32GpioState *s = ESP32_GPIO(opaque);
@@ -86,10 +245,17 @@ static uint64_t esp32_gpio_read(void *opaque, hwaddr addr, unsigned int size)
         r = s->strap_mode;
         break;
     case A_GPIO_IN:
-        r = s->gpio_in;
+        /*
+         * GPIO_IN reflects the actual pad level:
+         *   - Output-enabled pins: reflects the output register value
+         *   - Input pins: reflects the externally driven level (gpio_in)
+         */
+        r = (s->gpio_out & s->gpio_enable) |
+            (s->gpio_in & ~s->gpio_enable);
         break;
     case A_GPIO_IN1:
-        r = s->gpio_in1;
+        r = (s->gpio_out1 & s->gpio_enable1) |
+            (s->gpio_in1 & ~s->gpio_enable1);
         break;
     case A_GPIO_STATUS:
         r = s->gpio_status;
@@ -217,22 +383,28 @@ static void esp32_gpio_write(void *opaque, hwaddr addr,
 
     case A_GPIO_STATUS:
         s->gpio_status = wval;
+        esp32_gpio_update_irq(s);
         break;
     case A_GPIO_STATUS_W1TS:
         s->gpio_status |= wval;
+        esp32_gpio_update_irq(s);
         break;
     case A_GPIO_STATUS_W1TC:
         s->gpio_status &= ~wval;
+        esp32_gpio_update_irq(s);
         break;
 
     case A_GPIO_STATUS1:
         s->gpio_status1 = wval;
+        esp32_gpio_update_irq(s);
         break;
     case A_GPIO_STATUS1_W1TS:
         s->gpio_status1 |= wval;
+        esp32_gpio_update_irq(s);
         break;
     case A_GPIO_STATUS1_W1TC:
         s->gpio_status1 &= ~wval;
+        esp32_gpio_update_irq(s);
         break;
 
     default:
@@ -241,6 +413,28 @@ static void esp32_gpio_write(void *opaque, hwaddr addr,
             addr < GPIO_PIN_REG_BASE + ESP32_GPIO_MAX_COUNT * 4) {
             int pin = (addr - GPIO_PIN_REG_BASE) / 4;
             s->pin_reg[pin] = wval;
+            /*
+             * Re-evaluate interrupt for this pin: firmware may have just
+             * enabled an interrupt on a pin already at the triggering level.
+             */
+            bool level = esp32_gpio_get_pin_level(s, pin);
+            int int_type = (wval & GPIO_PIN_INT_TYPE_MASK) >>
+                           GPIO_PIN_INT_TYPE_SHIFT;
+            int int_ena = (wval & GPIO_PIN_INT_ENA_MASK) >>
+                          GPIO_PIN_INT_ENA_SHIFT;
+            if (int_ena && int_type >= GPIO_INT_TYPE_LOW_LEVEL) {
+                /* Level-triggered: check if already at triggering level */
+                bool trig = (int_type == GPIO_INT_TYPE_LOW_LEVEL) ? !level
+                                                                  : !!level;
+                if (trig) {
+                    if (pin < 32) {
+                        s->gpio_status |= (1u << pin);
+                    } else {
+                        s->gpio_status1 |= (1u << (pin - 32));
+                    }
+                    esp32_gpio_update_irq(s);
+                }
+            }
         }
         /* Function input selection */
         else if (addr >= GPIO_FUNC_IN_SEL_BASE &&
@@ -280,14 +474,24 @@ static void esp32_gpio_reset_hold(Object *obj, ResetType type)
     s->gpio_out1 = 0;
     s->gpio_enable = 0;
     s->gpio_enable1 = 0;
-    s->gpio_in = 0;
-    s->gpio_in1 = 0;
+    /*
+     * Default input level: all HIGH.
+     * This simulates pull-up resistors on all pins, which matches the
+     * M5StickS3 button convention (active-low: HIGH = released, LOW = pressed).
+     * Firmware that configures pull-downs will override via IO_MUX (not yet
+     * emulated), but for buttons this is the correct default.
+     */
+    s->gpio_in = 0xFFFFFFFF;
+    s->gpio_in1 = 0x0001FFFF;  /* Only bits 0-16 valid (GPIO 32-48) */
     s->gpio_status = 0;
     s->gpio_status1 = 0;
 
     memset(s->pin_reg, 0, sizeof(s->pin_reg));
     memset(s->func_in_sel, 0, sizeof(s->func_in_sel));
     memset(s->func_out_sel, 0, sizeof(s->func_out_sel));
+
+    /* Lower the interrupt line */
+    qemu_irq_lower(s->irq);
 }
 
 
@@ -313,6 +517,10 @@ static void esp32_gpio_init(Object *obj)
     /* Initialize output GPIOs so other devices can observe pin state */
     qdev_init_gpio_out_named(DEVICE(s), s->out_gpios, "gpio-out",
                              ESP32_GPIO_MAX_COUNT);
+
+    /* Initialize input GPIOs so other devices can drive pin state */
+    qdev_init_gpio_in_named(DEVICE(s), esp32_gpio_input_handler, "gpio-in",
+                            ESP32_GPIO_MAX_COUNT);
 }
 
 
