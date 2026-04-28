@@ -71,6 +71,9 @@
 #include "hw/display/esp_rgb.h"
 #include "hw/ssi/esp32s3_gpspi.h"
 #include "hw/display/st7789v2.h"
+#include "hw/audio/esp32s3_i2s.h"
+#include "hw/audio/es8311.h"
+#include "hw/i2c/esp32_i2c.h"
 
 #define TYPE_ESP32S3_SOC "xtensa.esp32s3"
 #define ESP32S3_SOC(obj) OBJECT_CHECK(Esp32s3SocState, (obj), TYPE_ESP32S3_SOC)
@@ -155,6 +158,12 @@ typedef struct Esp32s3SocState {
 
     /* GPSPI controllers (SPI2 and SPI3) for external peripherals */
     ESP32S3GpspiState gpspi[2];
+
+    /* I2S controllers for audio */
+    ESP32S3I2sState i2s[2];
+
+    /* I2C controllers */
+    Esp32I2CState i2c[ESP32S3_I2C_COUNT];
 
     MemoryRegion iomem;
     DWCSDMMCState sdmmc;
@@ -647,6 +656,10 @@ static void esp32s3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(ss), "gpio", &ss->gpio, TYPE_ESP32S3_GPIO);
     object_initialize_child(OBJECT(ss), "gpspi2", &ss->gpspi[0], TYPE_ESP32S3_GPSPI);
     object_initialize_child(OBJECT(ss), "gpspi3", &ss->gpspi[1], TYPE_ESP32S3_GPSPI);
+    object_initialize_child(OBJECT(ss), "i2s0", &ss->i2s[0], TYPE_ESP32S3_I2S);
+    object_initialize_child(OBJECT(ss), "i2s1", &ss->i2s[1], TYPE_ESP32S3_I2S);
+    object_initialize_child(OBJECT(ss), "i2c0", &ss->i2c[0], TYPE_ESP32_I2C);
+    object_initialize_child(OBJECT(ss), "i2c1", &ss->i2c[1], TYPE_ESP32_I2C);
     object_initialize_child(OBJECT(ss), "rng", &ss->rng, TYPE_ESP32S3_RNG);
 
     object_initialize_child(OBJECT(ss), "clock", &ss->clock, TYPE_ESP32S3_CLOCK);
@@ -827,6 +840,50 @@ static void esp32s3_machine_init(MachineState *machine)
                                     qdev_get_gpio_in_named(st7789, "dc", 0));
     }
 
+
+    /* I2S0 controller (audio) */
+    {
+        ss->i2s[0].gdma = ESP_GDMA(&ss->gdma);
+        ss->i2s[0].gdma_periph_id = GDMA_I2S0;
+        sysbus_realize(SYS_BUS_DEVICE(&ss->i2s[0]), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2s[0]), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_I2S_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2s[0]), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_I2S0_INTR_SOURCE));
+    }
+
+    /* I2S1 controller */
+    {
+        ss->i2s[1].gdma = ESP_GDMA(&ss->gdma);
+        ss->i2s[1].gdma_periph_id = GDMA_I2S1;
+        sysbus_realize(SYS_BUS_DEVICE(&ss->i2s[1]), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2s[1]), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_I2S1_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2s[1]), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_I2S1_INTR_SOURCE));
+    }
+
+    /* I2C0 controller (used for ES8311 codec on M5StickS3) */
+    {
+        sysbus_realize(SYS_BUS_DEVICE(&ss->i2c[0]), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2c[0]), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C_EXT_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2c[0]), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE));
+
+        /* Attach ES8311 audio codec to I2C0 bus */
+        I2CBus *i2c_bus = I2C_BUS(qdev_get_child_bus(DEVICE(&ss->i2c[0]), "i2c"));
+        i2c_slave_create_simple(i2c_bus, TYPE_ES8311, ES8311_I2C_ADDR);
+    }
+
+    /* I2C1 controller */
+    {
+        sysbus_realize(SYS_BUS_DEVICE(&ss->i2c[1]), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2c[1]), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C1_EXT_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2c[1]), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT1_INTR_SOURCE));
+    }
 
     /* GDMA Realization */
     {
