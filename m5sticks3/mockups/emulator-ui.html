@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>M5StickS3 Emulator – UI Mockup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: #e0e0e0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  .emulator-container {
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+  }
+
+  /* === THE DEVICE === */
+  .device-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  /* Left side buttons (KEY2, speaker grille, IR) */
+  .left-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 12px;
+    margin-right: -2px;
+    z-index: 1;
+  }
+  .side-btn {
+    width: 6px;
+    height: 28px;
+    background: #555;
+    border-radius: 2px 0 0 2px;
+    cursor: pointer;
+    transition: all 0.1s;
+    position: relative;
+  }
+  .side-btn:hover {
+    background: #777;
+  }
+  .side-btn:active {
+    background: #999;
+    width: 5px;
+  }
+  .side-btn-label {
+    position: absolute;
+    right: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: #888;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .side-btn:hover .side-btn-label {
+    opacity: 1;
+  }
+
+  .device {
+    width: 192px;
+    height: 384px;
+    background: linear-gradient(145deg, #4a4a52, #3a3a42);
+    border-radius: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 16px;
+    position: relative;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.06),
+      0 8px 32px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+
+  /* Subtle STICK text on left edge */
+  .device::before {
+    content: 'STICK';
+    position: absolute;
+    left: 6px;
+    top: 50%;
+    transform: translateY(-50%) rotate(-90deg);
+    font-size: 8px;
+    letter-spacing: 3px;
+    color: rgba(255,255,255,0.08);
+    font-weight: 700;
+  }
+
+  .screen-bezel {
+    width: 156px;
+    height: 260px;
+    background: #222;
+    border-radius: 6px;
+    padding: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow:
+      inset 0 1px 3px rgba(0,0,0,0.5),
+      0 0 0 1px rgba(255,255,255,0.04);
+  }
+
+  .screen {
+    width: 135px;
+    height: 240px;
+    background: #000;
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+    image-rendering: pixelated;
+  }
+
+  /* Simulated firmware display content */
+  .screen-content {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: #00ff88;
+  }
+  .screen-content .title {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #333;
+  }
+  .screen-content .line {
+    margin: 2px 0;
+    font-size: 10px;
+  }
+  .screen-content .val { color: #00ccff; }
+  .screen-content .status-bar {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #666;
+    padding-top: 4px;
+    border-top: 1px solid #222;
+  }
+  .cursor-blink {
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  /* Blue front button */
+  .front-button-area {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .front-button {
+    width: 56px;
+    height: 18px;
+    background: linear-gradient(180deg, #4fc3f7, #0288d1);
+    border-radius: 9px;
+    cursor: pointer;
+    transition: all 0.1s;
+    box-shadow:
+      0 2px 8px rgba(2, 136, 209, 0.4),
+      inset 0 1px 0 rgba(255,255,255,0.3);
+  }
+  .front-button:hover {
+    background: linear-gradient(180deg, #67d4ff, #039be5);
+    box-shadow:
+      0 2px 12px rgba(2, 136, 209, 0.6),
+      inset 0 1px 0 rgba(255,255,255,0.4);
+  }
+  .front-button:active {
+    background: linear-gradient(180deg, #0277bd, #01579b);
+    transform: scale(0.96);
+    box-shadow:
+      0 1px 4px rgba(2, 136, 209, 0.3),
+      inset 0 1px 2px rgba(0,0,0,0.3);
+  }
+  .btn-label {
+    font-size: 9px;
+    color: #666;
+    text-align: center;
+  }
+
+  /* Bottom port hints */
+  .bottom-ports {
+    position: absolute;
+    bottom: 8px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+  .usb-port {
+    width: 16px;
+    height: 6px;
+    background: #2a2a30;
+    border-radius: 2px;
+    border: 1px solid #555;
+  }
+
+  /* Right side label area */
+  .right-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-left: -2px;
+  }
+  .side-label {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    font-size: 9px;
+    letter-spacing: 2px;
+    padding: 8px 4px;
+  }
+  .side-label .stick { color: #888; font-weight: 600; }
+  .side-label .s3 {
+    color: #4fc3f7;
+    font-weight: 700;
+    background: rgba(79,195,247,0.1);
+    padding: 2px 3px;
+    border-radius: 2px;
+  }
+
+  /* === CONTROL PANEL === */
+  .control-panel {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 24px;
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .panel-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #888;
+  }
+
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .control-group-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    margin-bottom: 2px;
+  }
+
+  .ctrl-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 12px;
+    color: #ccc;
+  }
+  .ctrl-btn:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+  }
+  .ctrl-btn:active {
+    background: rgba(255,255,255,0.12);
+    transform: scale(0.98);
+  }
+  .ctrl-btn .key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 20px;
+    padding: 0 6px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 4px;
+    font-size: 10px;
+    color: #999;
+    font-family: monospace;
+  }
+  .ctrl-btn .icon {
+    width: 20px;
+    text-align: center;
+    font-size: 14px;
+  }
+  .ctrl-btn.blue .icon { color: #4fc3f7; }
+  .ctrl-btn.gray .icon { color: #888; }
+  .ctrl-btn.red .icon { color: #ef5350; }
+
+  .divider {
+    height: 1px;
+    background: rgba(255,255,255,0.06);
+  }
+
+  /* Status indicators */
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }
+  .status-dot.green { background: #4caf50; box-shadow: 0 0 6px rgba(76,175,80,0.5); }
+  .status-dot.yellow { background: #ffc107; box-shadow: 0 0 6px rgba(255,193,7,0.5); }
+  .status-dot.off { background: #555; }
+
+  .window-title {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 32px;
+    background: rgba(30,30,50,0.95);
+    backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: #888;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    z-index: 10;
+  }
+  .window-title strong { color: #ccc; margin-right: 8px; }
+
+  /* Keyboard hint */
+  .keyboard-hints {
+    font-size: 10px;
+    color: #555;
+    text-align: center;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div class="window-title">
+  <strong>M5StickS3 Emulator</strong> firmware.bin — running
+</div>
+
+<div class="emulator-container">
+
+  <!-- THE DEVICE -->
+  <div class="device-wrapper">
+    <!-- Left side: KEY2 button -->
+    <div class="left-side">
+      <div style="height: 60px;"></div>
+      <div class="side-btn" title="KEY2 (GPIO 12)" onclick="flash(this)">
+        <span class="side-btn-label">KEY2</span>
+      </div>
+      <div style="height: 20px;"></div>
+      <!-- Speaker grille hint -->
+      <div style="width: 4px; height: 16px; display: flex; flex-direction: column; gap: 2px; margin-right: 2px;">
+        <div style="width: 4px; height: 2px; background: #555; border-radius: 1px;"></div>
+        <div style="width: 4px; height: 2px; background: #555; border-radius: 1px;"></div>
+        <div style="width: 4px; height: 2px; background: #555; border-radius: 1px;"></div>
+      </div>
+    </div>
+
+    <div class="device">
+      <!-- Screen -->
+      <div class="screen-bezel">
+        <div class="screen">
+          <div class="screen-content">
+            <div class="title">M5StickS3</div>
+            <div class="line">WiFi: <span class="val">Connected</span></div>
+            <div class="line">IP: <span class="val">192.168.1.42</span></div>
+            <div class="line">Temp: <span class="val">23.4°C</span></div>
+            <div class="line">Batt: <span class="val">87%</span></div>
+            <div class="line">&nbsp;</div>
+            <div class="line" style="color: #888;">Button: <span class="val">--</span></div>
+            <div class="line" style="color: #888;">Uptime: <span class="val">00:04:32</span></div>
+            <div class="status-bar">
+              <span>FW v1.2.0</span>
+              <span class="cursor-blink">▮</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Blue front button (KEY1) -->
+      <div class="front-button-area">
+        <div class="front-button" title="KEY1 (GPIO 11)" onclick="flash(this)"></div>
+        <div class="btn-label">KEY1</div>
+      </div>
+
+      <!-- Bottom USB-C hint -->
+      <div class="bottom-ports">
+        <div class="usb-port" title="USB-C"></div>
+      </div>
+    </div>
+
+    <!-- Right side: label -->
+    <div class="right-side">
+      <div class="side-label">
+        <span class="stick">STICK</span>&nbsp;<span class="s3">S3</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONTROL PANEL -->
+  <div class="control-panel">
+    <div class="panel-title">Controls</div>
+
+    <div class="control-group">
+      <div class="control-group-label">Buttons</div>
+      <div class="ctrl-btn blue" onclick="flash(this)">
+        <span class="icon">●</span>
+        <span>KEY1 — Front Button</span>
+        <span class="key">A</span>
+      </div>
+      <div class="ctrl-btn gray" onclick="flash(this)">
+        <span class="icon">●</span>
+        <span>KEY2 — Side Button</span>
+        <span class="key">B</span>
+      </div>
+      <div class="ctrl-btn red" onclick="flash(this)">
+        <span class="icon">⏻</span>
+        <span>Power (double-click K1)</span>
+        <span class="key">P</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="control-group">
+      <div class="control-group-label">Status</div>
+      <div class="status-row">
+        <span><span class="status-dot green"></span>CPU Running</span>
+        <span style="color: #666;">240 MHz</span>
+      </div>
+      <div class="status-row">
+        <span><span class="status-dot green"></span>Display</span>
+        <span style="color: #666;">135×240</span>
+      </div>
+      <div class="status-row">
+        <span><span class="status-dot yellow"></span>WiFi</span>
+        <span style="color: #666;">Virtual NIC</span>
+      </div>
+      <div class="status-row">
+        <span><span class="status-dot off"></span>Audio</span>
+        <span style="color: #666;">Not impl.</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="control-group">
+      <div class="control-group-label">Serial Output</div>
+      <div style="background: #111; border-radius: 6px; padding: 8px; font-family: 'Courier New', monospace; font-size: 10px; color: #4caf50; height: 80px; overflow: hidden; line-height: 1.5;">
+        <div>I (432) cpu_start: Starting scheduler</div>
+        <div>I (440) main: M5StickS3 init OK</div>
+        <div>I (445) wifi: connected</div>
+        <div>I (1204) display: ST7789 ready</div>
+        <div style="color: #666;">▮</div>
+      </div>
+    </div>
+
+    <div class="keyboard-hints">
+      Press A / B for buttons · Esc to pause
+    </div>
+  </div>
+
+</div>
+
+<script>
+function flash(el) {
+  el.style.transition = 'none';
+  el.style.filter = 'brightness(1.5)';
+  setTimeout(() => {
+    el.style.transition = 'filter 0.3s';
+    el.style.filter = '';
+  }, 100);
+}
+</script>
+
+</body>
+</html>
