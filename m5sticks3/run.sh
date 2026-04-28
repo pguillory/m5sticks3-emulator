@@ -29,6 +29,36 @@ FLASH_SIZE=8388608  # 8 * 1024 * 1024
 # Default PSRAM: 8MB
 PSRAM_SIZE=8  # in MB
 
+# Valid flash sizes in bytes (2MB, 4MB, 8MB, 16MB)
+VALID_FLASH_SIZES=(2097152 4194304 8388608 16777216)
+
+# Pad a flash image file to the nearest valid flash size
+pad_flash_image() {
+    local file="$1"
+    local file_size
+    file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+
+    # Find the smallest valid size >= file_size
+    local target_size=0
+    for vs in "${VALID_FLASH_SIZES[@]}"; do
+        if [ "$file_size" -le "$vs" ]; then
+            target_size=$vs
+            break
+        fi
+    done
+
+    if [ "$target_size" -eq 0 ]; then
+        echo "Error: Firmware image (${file_size} bytes) exceeds maximum flash size (16MB)."
+        exit 1
+    fi
+
+    if [ "$file_size" -lt "$target_size" ]; then
+        local pad_bytes=$((target_size - file_size))
+        echo "Padding flash image from ${file_size} to ${target_size} bytes (+${pad_bytes} bytes)"
+        dd if=/dev/zero bs=1 count="$pad_bytes" >> "$file" 2>/dev/null
+    fi
+}
+
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS] <firmware>
@@ -138,7 +168,10 @@ if [ -n "$PIO_DIR" ]; then
     merge_pio_image "$PIO_DIR" "$FLASH_IMAGE"
 elif [ -n "$INPUT" ]; then
     if $IS_FLASH_IMAGE; then
-        FLASH_IMAGE="$INPUT"
+        # Copy to temp so we can pad without modifying the original
+        FLASH_IMAGE="${TMPDIR}/flash.bin"
+        cp "$INPUT" "$FLASH_IMAGE"
+        pad_flash_image "$FLASH_IMAGE"
     elif [[ "$INPUT" == *.elf ]]; then
         # ELF files can be loaded directly
         exec "$QEMU" \
