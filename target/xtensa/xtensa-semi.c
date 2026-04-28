@@ -209,9 +209,13 @@ void HELPER(simcall)(CPUXtensaState *env)
                 .regs = env->regs,
                 .cpu_state = cs,
                 .pc = env->pc,
+                .new_pc = 0,
             };
             bool need_exit = hook->handler(&hook_regs, hook->opaque);
             if (need_exit) {
+                if (hook_regs.new_pc) {
+                    env->pc = hook_regs.new_pc;
+                }
                 cpu_loop_exit(cs);
             }
             return;

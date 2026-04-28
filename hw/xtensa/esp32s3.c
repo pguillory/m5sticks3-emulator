@@ -75,6 +75,7 @@
 #include "hw/audio/es8311.h"
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/misc/esp32s3_wifi.h"
+#include "hw/misc/esp32s3_wifi_net.h"
 #include "hw/misc/esp32s3_ble.h"
 #include "hw/xtensa/esp32s3_elf_hooks.h"
 
@@ -170,6 +171,9 @@ typedef struct Esp32s3SocState {
 
     /* WiFi register stubs */
     Esp32s3WifiState wifi;
+
+    /* WiFi network bridge (API interception + NIC) */
+    Esp32s3WifiNetState wifi_net;
 
     /* BLE bridge */
     Esp32s3BleState ble;
@@ -672,6 +676,7 @@ static void esp32s3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(ss), "i2c1", &ss->i2c[1], TYPE_ESP32_I2C);
     object_initialize_child(OBJECT(ss), "rng", &ss->rng, TYPE_ESP32S3_RNG);
     object_initialize_child(OBJECT(ss), "wifi", &ss->wifi, TYPE_ESP32S3_WIFI);
+    object_initialize_child(OBJECT(ss), "wifi_net", &ss->wifi_net, TYPE_ESP32S3_WIFI_NET);
     object_initialize_child(OBJECT(ss), "ble", &ss->ble, TYPE_ESP32S3_BLE);
 
     object_initialize_child(OBJECT(ss), "clock", &ss->clock, TYPE_ESP32S3_CLOCK);
@@ -994,6 +999,12 @@ static void esp32s3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, ESP32S3_WDEV_BASE, mr, 0);
     }
 
+    /* WiFi network bridge (API interception) */
+    {
+        ss->wifi_net.cpu = &ss->cpu[0];
+        sysbus_realize(SYS_BUS_DEVICE(&ss->wifi_net), &error_fatal);
+    }
+
     /* BLE bridge at DR_REG_BT_BASE (0x60011000) */
     {
         ss->ble.cpu = &ss->cpu[0];
@@ -1032,6 +1043,7 @@ static void esp32s3_machine_init(MachineState *machine)
         Esp32s3ElfHooks *elf_hooks = esp32s3_elf_hooks_new();
         esp32s3_elf_hooks_global = elf_hooks;
         esp32s3_ble_register_hooks(&ss->ble, elf_hooks);
+        esp32s3_wifi_net_register_hooks(&ss->wifi_net, elf_hooks);
 
         uint64_t elf_entry;
         uint64_t elf_lowaddr;
@@ -1050,6 +1062,12 @@ static void esp32s3_machine_init(MachineState *machine)
 
         /* Patch matched function entry points with SIMCALL trampolines */
         esp32s3_elf_hooks_patch(elf_hooks, &ss->cpu[0]);
+
+        /* Write extended trampolines for WiFi functions that need event delivery */
+        esp32s3_wifi_net_patch_extended(&ss->wifi_net, elf_hooks, &ss->cpu[0]);
+
+        /* Initialize WiFi mailbox in guest memory */
+        esp32s3_wifi_net_init_mailbox(&ss->wifi_net);
 
         if (elf_entry != XCHAL_RESET_VECTOR_PADDR) {
             // Since ROM is empty when loading elf file AND

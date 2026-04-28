@@ -25,7 +25,7 @@
 #include "hw/loader.h"
 
 /* Maximum number of functions that can be hooked */
-#define ESP32S3_ELF_HOOKS_MAX  64
+#define ESP32S3_ELF_HOOKS_MAX  128
 
 /* Xtensa trampoline: ENTRY a1,32 + SIMCALL + RETW = 9 bytes */
 #define ESP32S3_TRAMPOLINE_SIZE 9
@@ -44,7 +44,8 @@
 typedef struct Esp32s3ElfHookRegs {
     uint32_t *regs;     /* Pointer to register array (a0-a15+) */
     void *cpu_state;    /* CPUState* for cpu_physical_memory_read/write */
-    uint32_t pc;        /* Current program counter */
+    uint32_t pc;        /* Current program counter (read-only) */
+    uint32_t new_pc;    /* If non-zero, set PC to this value (for redirection) */
 } Esp32s3ElfHookRegs;
 
 /*

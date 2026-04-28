@@ -170,6 +170,7 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
   'esp_hmac.c',
   'esp32s3_hmac.c',
   'esp32s3_wifi.c',
+  'esp32s3_wifi_net.c',
   'esp32s3_ble.c',
 ))
 if host_os == 'darwin'
