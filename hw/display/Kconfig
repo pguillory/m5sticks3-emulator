@@ -143,3 +143,6 @@ config DM163
 
 config ESP_RGB
     bool
+
+config ST7789V2
+    bool

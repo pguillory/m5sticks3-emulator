@@ -69,6 +69,8 @@
 
 #include "hw/misc/esp32c3_jtag.h"
 #include "hw/display/esp_rgb.h"
+#include "hw/ssi/esp32s3_gpspi.h"
+#include "hw/display/st7789v2.h"
 
 #define TYPE_ESP32S3_SOC "xtensa.esp32s3"
 #define ESP32S3_SOC(obj) OBJECT_CHECK(Esp32s3SocState, (obj), TYPE_ESP32S3_SOC)
@@ -150,6 +152,9 @@ typedef struct Esp32s3SocState {
 
     ESP32C3UsbJtagState jtag;
     ESPRgbState rgb;
+
+    /* GPSPI controllers (SPI2 and SPI3) for external peripherals */
+    ESP32S3GpspiState gpspi[2];
 
     MemoryRegion iomem;
     DWCSDMMCState sdmmc;
@@ -640,6 +645,8 @@ static void esp32s3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(ss), "efuse", &ss->efuse, TYPE_ESP32S3_EFUSE);
     object_initialize_child(OBJECT(ss), "jtag", &ss->jtag, TYPE_ESP32C3_JTAG);
     object_initialize_child(OBJECT(ss), "gpio", &ss->gpio, TYPE_ESP32S3_GPIO);
+    object_initialize_child(OBJECT(ss), "gpspi2", &ss->gpspi[0], TYPE_ESP32S3_GPSPI);
+    object_initialize_child(OBJECT(ss), "gpspi3", &ss->gpspi[1], TYPE_ESP32S3_GPSPI);
     object_initialize_child(OBJECT(ss), "rng", &ss->rng, TYPE_ESP32S3_RNG);
 
     object_initialize_child(OBJECT(ss), "clock", &ss->clock, TYPE_ESP32S3_CLOCK);
@@ -779,6 +786,45 @@ static void esp32s3_machine_init(MachineState *machine)
         qdev_realize(DEVICE(&ss->rng), &ss->periph_bus, &error_fatal);
         esp32s3_soc_add_periph_device(sys_mem, &ss->rng, ESP32S3_RNG_BASE);
 
+    }
+
+    /* GPSPI2 controller */
+    {
+        ss->gpspi[0].gdma = ESP_GDMA(&ss->gdma);
+        ss->gpspi[0].gdma_periph_id = GDMA_SPI2;
+        sysbus_realize(SYS_BUS_DEVICE(&ss->gpspi[0]), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->gpspi[0]), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->gpspi[0]), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_SPI2_INTR_SOURCE));
+    }
+
+    /* GPSPI3 controller + ST7789V2 display */
+    {
+        ss->gpspi[1].gdma = ESP_GDMA(&ss->gdma);
+        ss->gpspi[1].gdma_periph_id = GDMA_SPI3;
+        sysbus_realize(SYS_BUS_DEVICE(&ss->gpspi[1]), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->gpspi[1]), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI3_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->gpspi[1]), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_SPI3_INTR_SOURCE));
+
+        /* Attach ST7789V2 display as SPI slave on GPSPI3's bus */
+        DeviceState *spi3_master = DEVICE(&ss->gpspi[1]);
+        BusState *spi3_bus = qdev_get_child_bus(spi3_master, "spi");
+        DeviceState *st7789 = qdev_new(TYPE_ST7789V2);
+        qdev_realize(st7789, spi3_bus, &error_fatal);
+
+        /* Connect GPSPI3 CS0 to ST7789V2 CS */
+        qdev_connect_gpio_out_named(spi3_master, SSI_GPIO_CS, 0,
+                                    qdev_get_gpio_in_named(st7789, SSI_GPIO_CS, 0));
+
+        /*
+         * Connect GPIO pin 45 (DC) to the ST7789V2's DC input.
+         * M5StickS3 uses GPIO 45 for the display Data/Command signal.
+         */
+        qdev_connect_gpio_out_named(DEVICE(&ss->gpio), "gpio-out", 45,
+                                    qdev_get_gpio_in_named(st7789, "dc", 0));
     }
 
 
