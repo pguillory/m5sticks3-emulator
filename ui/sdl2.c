@@ -78,11 +78,15 @@ static struct sdl2_console *get_scon_from_window(uint32_t window_id)
 void sdl2_window_create(struct sdl2_console *scon)
 {
     int flags = 0;
+    int win_w, win_h;
 
     if (!scon->surface) {
         return;
     }
     assert(!scon->real_window);
+
+    /* Detect M5StickS3 device shell mode (ST7789V2 surface: 240x320) */
+    scon->m5_device_shell = m5sticks3_detect(scon);
 
     if (gui_fullscreen) {
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
@@ -98,10 +102,16 @@ void sdl2_window_create(struct sdl2_console *scon)
     }
 #endif
 
+    if (scon->m5_device_shell) {
+        m5sticks3_get_window_size(&win_w, &win_h);
+    } else {
+        win_w = surface_width(scon->surface);
+        win_h = surface_height(scon->surface);
+    }
+
     scon->real_window = SDL_CreateWindow("", SDL_WINDOWPOS_UNDEFINED,
                                          SDL_WINDOWPOS_UNDEFINED,
-                                         surface_width(scon->surface),
-                                         surface_height(scon->surface),
+                                         win_w, win_h,
                                          flags);
     if (scon->opengl) {
         const char *driver = "opengl";
@@ -146,9 +156,15 @@ void sdl2_window_resize(struct sdl2_console *scon)
         return;
     }
 
-    SDL_SetWindowSize(scon->real_window,
-                      surface_width(scon->surface),
-                      surface_height(scon->surface));
+    if (scon->m5_device_shell) {
+        int w, h;
+        m5sticks3_get_window_size(&w, &h);
+        SDL_SetWindowSize(scon->real_window, w, h);
+    } else {
+        SDL_SetWindowSize(scon->real_window,
+                          surface_width(scon->surface),
+                          surface_height(scon->surface));
+    }
 }
 
 static void sdl2_redraw(struct sdl2_console *scon)
@@ -188,7 +204,10 @@ static void sdl_update_caption(struct sdl2_console *scon)
         }
     }
 
-    if (qemu_name) {
+    if (scon->m5_device_shell) {
+        snprintf(win_title, sizeof(win_title), "M5StickS3 Emulator%s", status);
+        snprintf(icon_title, sizeof(icon_title), "M5StickS3");
+    } else if (qemu_name) {
         snprintf(win_title, sizeof(win_title), "QEMU (%s-%d)%s", qemu_name,
                  scon->idx, status);
         snprintf(icon_title, sizeof(icon_title), "QEMU (%s)", qemu_name);
@@ -453,6 +472,12 @@ static void handle_keydown(SDL_Event *ev)
         }
     }
     if (!scon->gui_keysym) {
+        /* In M5StickS3 mode, A/B keys are device buttons */
+        if (scon->m5_device_shell &&
+            m5sticks3_handle_key(scon, ev->key.keysym.scancode, true)) {
+            sdl2_redraw(scon);
+            return;
+        }
         sdl2_process_key(scon, &ev->key);
     }
 }
@@ -466,6 +491,12 @@ static void handle_keyup(SDL_Event *ev)
     }
 
     scon->ignore_hotkeys = false;
+
+    /* In M5StickS3 mode, consume A/B key releases (toggle on press only) */
+    if (scon->m5_device_shell &&
+        m5sticks3_handle_key(scon, ev->key.keysym.scancode, false)) {
+        return;
+    }
     sdl2_process_key(scon, &ev->key);
 }
 
@@ -525,6 +556,17 @@ static void handle_mousebutton(SDL_Event *ev)
     }
 
     bev = &ev->button;
+
+    /* In M5StickS3 mode, intercept left clicks for button toggle */
+    if (scon->m5_device_shell && bev->button == SDL_BUTTON_LEFT &&
+        ev->type == SDL_MOUSEBUTTONDOWN) {
+        if (m5sticks3_handle_mouse_click(scon, bev->x, bev->y)) {
+            /* Force a redraw to show button state change */
+            sdl2_redraw(scon);
+            return;
+        }
+    }
+
     if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
         if (ev->type == SDL_MOUSEBUTTONUP && bev->button == SDL_BUTTON_LEFT) {
             /* start grabbing all events */

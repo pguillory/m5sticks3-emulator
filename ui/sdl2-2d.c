@@ -51,9 +51,15 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     SDL_UpdateTexture(scon->texture, &rect,
                       surface_data(surf) + surface_data_offset,
                       surface_stride(surf));
-    SDL_RenderClear(scon->real_renderer);
-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
-    SDL_RenderPresent(scon->real_renderer);
+
+    if (scon->m5_device_shell) {
+        /* Use M5StickS3 device shell renderer */
+        m5sticks3_render(scon);
+    } else {
+        SDL_RenderClear(scon->real_renderer);
+        SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
+        SDL_RenderPresent(scon->real_renderer);
+    }
 }
 
 void sdl2_2d_switch(DisplayChangeListener *dcl,
@@ -79,15 +85,17 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
 
     if (!scon->real_window) {
         sdl2_window_create(scon);
-    } else if (old_surface &&
+    } else if (old_surface && !scon->m5_device_shell &&
                ((surface_width(old_surface)  != surface_width(new_surface)) ||
                 (surface_height(old_surface) != surface_height(new_surface)))) {
         sdl2_window_resize(scon);
     }
 
-    SDL_RenderSetLogicalSize(scon->real_renderer,
-                             surface_width(new_surface),
-                             surface_height(new_surface));
+    if (!scon->m5_device_shell) {
+        SDL_RenderSetLogicalSize(scon->real_renderer,
+                                 surface_width(new_surface),
+                                 surface_height(new_surface));
+    }
 
     switch (surface_format(scon->surface)) {
     case PIXMAN_x1r5g5b5:

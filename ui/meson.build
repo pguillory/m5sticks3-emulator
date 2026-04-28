@@ -124,6 +124,7 @@ if sdl.found()
   sdl_ss.add(sdl, sdl_image, pixman, glib, files(
     'sdl2-2d.c',
     'sdl2-input.c',
+    'sdl2-m5sticks3.c',
     'sdl2.c',
   ))
   sdl_ss.add(when: opengl, if_true: files('sdl2-gl.c'))

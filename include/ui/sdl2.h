@@ -45,6 +45,12 @@ struct sdl2_console {
     bool gui_keysym;
     SDL_GLContext winctx;
     QKbdState *kbd;
+
+    /* M5StickS3 device shell mode */
+    bool m5_device_shell;   /* true if this console uses device shell rendering */
+    bool m5_key1_held;      /* KEY1 (front blue button) toggle state */
+    bool m5_key2_held;      /* KEY2 (side button) toggle state */
+
 #ifdef CONFIG_OPENGL
     QemuGLShader *gls;
     egl_fb guest_fb;
@@ -96,5 +102,14 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                              void *d3d_tex2d);
 void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+
+/* M5StickS3 device shell overlay (ui/sdl2-m5sticks3.c) */
+bool m5sticks3_detect(struct sdl2_console *scon);
+void m5sticks3_get_window_size(int *w, int *h);
+void m5sticks3_render(struct sdl2_console *scon);
+bool m5sticks3_handle_mouse_click(struct sdl2_console *scon, int x, int y);
+bool m5sticks3_handle_key(struct sdl2_console *scon, SDL_Scancode scancode,
+                          bool down);
+void m5sticks3_set_button(int gpio_pin, bool held);
 
 #endif /* SDL2_H */
