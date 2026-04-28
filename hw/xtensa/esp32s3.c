@@ -74,6 +74,7 @@
 #include "hw/audio/esp32s3_i2s.h"
 #include "hw/audio/es8311.h"
 #include "hw/i2c/esp32_i2c.h"
+#include "hw/misc/esp32s3_wifi.h"
 
 #define TYPE_ESP32S3_SOC "xtensa.esp32s3"
 #define ESP32S3_SOC(obj) OBJECT_CHECK(Esp32s3SocState, (obj), TYPE_ESP32S3_SOC)
@@ -164,6 +165,9 @@ typedef struct Esp32s3SocState {
 
     /* I2C controllers */
     Esp32I2CState i2c[ESP32S3_I2C_COUNT];
+
+    /* WiFi register stubs */
+    Esp32s3WifiState wifi;
 
     MemoryRegion iomem;
     DWCSDMMCState sdmmc;
@@ -661,6 +665,7 @@ static void esp32s3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(ss), "i2c0", &ss->i2c[0], TYPE_ESP32_I2C);
     object_initialize_child(OBJECT(ss), "i2c1", &ss->i2c[1], TYPE_ESP32_I2C);
     object_initialize_child(OBJECT(ss), "rng", &ss->rng, TYPE_ESP32S3_RNG);
+    object_initialize_child(OBJECT(ss), "wifi", &ss->wifi, TYPE_ESP32S3_WIFI);
 
     object_initialize_child(OBJECT(ss), "clock", &ss->clock, TYPE_ESP32S3_CLOCK);
 
@@ -973,6 +978,13 @@ static void esp32s3_machine_init(MachineState *machine)
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->rgb), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_FRAMEBUF_BASE, mr, 0);
         memory_region_add_subregion_overlap(sys_mem, esp32s3_memmap[ESP32S3_MEMREGION_FRAMEBUF].base, &ss->rgb.vram, 0);
+    }
+
+    /* WiFi register stubs - WDEV is at 0x3ff75000, outside the main IO catch-all region */
+    {
+        sysbus_realize(SYS_BUS_DEVICE(&ss->wifi), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->wifi), 0);
+        memory_region_add_subregion_overlap(sys_mem, ESP32S3_WDEV_BASE, mr, 0);
     }
 
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
