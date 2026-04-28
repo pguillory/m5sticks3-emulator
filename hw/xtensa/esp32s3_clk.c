@@ -52,6 +52,9 @@ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
     uint64_t r = 0;
 
     switch(addr) {
+        case A_SYSTEM_CORE_1_CONTROL_0_REG:
+            r = s->core1_ctrl0;
+            break;
         case A_SYSTEM_CORE_1_CONTROL_1_REG:
                 r = s->app_cpu_addr;
             break;
@@ -85,6 +88,15 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
     ESP32S3ClockState *s = ESP32S3_CLOCK(opaque);
 
     switch(addr) {
+        case A_SYSTEM_CORE_1_CONTROL_0_REG:
+            s->core1_ctrl0 = (uint32_t)value;
+            /* Bit 0: CLKGATE_EN, Bit 1: RUNSTALL
+             * When CLKGATE_EN=1 and RUNSTALL=0, CPU 1 is released */
+            {
+                bool stall = !(value & 0x1) || (value & 0x2);
+                qemu_set_irq(s->cpu1_stall, stall ? 1 : 0);
+            }
+            break;
         case A_SYSTEM_CORE_1_CONTROL_1_REG:
                 s->app_cpu_addr = (uint32_t)value;
             break;
@@ -93,6 +105,14 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
         case A_SYSTEM_CPU_INTR_FROM_CPU_2:
         case A_SYSTEM_CPU_INTR_FROM_CPU_3:
             esp32s3_write_cpu_intr(s, (addr - A_SYSTEM_CPU_INTR_FROM_CPU_0) / sizeof(uint32_t), value);
+            break;
+        case A_SYSTEM_CPU_PER_CONF:
+            s->cpuperconf = (uint32_t)value;
+            qemu_set_irq(s->clk_update, 1);
+            break;
+        case A_SYSTEM_SYSCLK_CONF:
+            s->sysclk = (uint32_t)value;
+            qemu_set_irq(s->clk_update, 1);
             break;
         case A_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL:
             s->sys_ext_dev_enc_dec_ctrl = value;
@@ -150,6 +170,14 @@ static void esp32s3_clock_init(Object *obj)
     for (uint64_t i = 0; i < ESP32S3_SYSTEM_CPU_INTR_COUNT; i++) {
         sysbus_init_irq(sbd, &s->irqs[i]);
     }
+
+    /* GPIO output for CPU 1 stall control */
+    qdev_init_gpio_out_named(DEVICE(sbd), &s->cpu1_stall,
+                             ESP32S3_CLOCK_CPU1_STALL_GPIO, 1);
+
+    /* GPIO output to signal clock frequency changes */
+    qdev_init_gpio_out_named(DEVICE(sbd), &s->clk_update,
+                             ESP32S3_CLOCK_UPDATE_GPIO, 1);
 }
 
 static void esp32s3_clock_class_init(ObjectClass *klass, void *data)

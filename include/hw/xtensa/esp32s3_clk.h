@@ -20,6 +20,8 @@
 
 
 #define ESP32S3_SYSTEM_CPU_INTR_COUNT   4
+#define ESP32S3_CLOCK_CPU1_STALL_GPIO  "cpu1-stall"
+#define ESP32S3_CLOCK_UPDATE_GPIO      "sysclk-update"
 
 /**
  * Value for SYSTEM_SOC_CLK_SEL
@@ -57,7 +59,14 @@ typedef struct ESP32S3ClockState {
     uint32_t levels;
     
     uint32_t app_cpu_addr;
-    
+    uint32_t core1_ctrl0;
+
+    /* GPIO output to control CPU 1 stall state */
+    qemu_irq cpu1_stall;
+
+    /* GPIO output to signal CPU clock frequency change */
+    qemu_irq clk_update;
+
     uint32_t sys_ext_dev_enc_dec_ctrl;
 } ESP32S3ClockState;
 

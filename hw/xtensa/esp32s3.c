@@ -27,6 +27,7 @@
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "target/xtensa/cpu.h"
+#include "hw/clock.h"
 
 #include "hw/misc/esp32s3_rtc_cntl.h"
 #include "hw/xtensa/esp32s3_intc.h"
@@ -52,6 +53,7 @@
 
 #include "hw/nvram/esp32s3_efuse.h"
 #include "hw/xtensa/esp32s3_clk.h"
+#include "hw/xtensa/esp32s3_clk_defs.h"
 #include "hw/dma/esp32s3_gdma.h"
 #include "hw/misc/esp32s3_sha.h"
 #include "hw/misc/esp32s3_aes.h"
@@ -254,12 +256,78 @@ static void esp32s3_soc_reset(DeviceState *dev)
 
 static void esp32s3_cpu_stall(void* opaque, int n, int level)
 {
+    Esp32s3SocState *s = ESP32S3_SOC(opaque);
+
+    bool stall = s->rtc_cntl.cpu_stall_state[n];
+
+    if (stall != s->cpu[n].env.runstall) {
+        xtensa_runstall(&s->cpu[n].env, stall);
+    }
 }
 
 static void esp32s3_clk_update(void* opaque, int n, int level)
 {
+    Esp32s3SocState *s = ESP32S3_SOC(opaque);
+    MachineState *ms = MACHINE(qdev_get_machine());
+
     if (!level) {
         return;
+    }
+
+    /* Determine CPU frequency from the clock module registers.
+     * SYSTEM_SYSCLK_CONF.SOC_CLK_SEL: 0=XTAL, 1=PLL, 2=RC_FAST
+     * SYSTEM_CPU_PER_CONF.PLL_FREQ_SEL: 0=480MHz, 1=320MHz
+     * SYSTEM_CPU_PER_CONF.CPUPERIOD_SEL: divider selection */
+    uint32_t soc_clk_sel = FIELD_EX32(s->clock.sysclk, SYSTEM_SYSCLK_CONF, SOC_CLK_SEL);
+    uint32_t cpu_freq_hz;
+
+    if (soc_clk_sel == ESP32S3_CLK_SEL_PLL) {
+        uint32_t pll_freq_sel = FIELD_EX32(s->clock.cpuperconf, SYSTEM_CPU_PER_CONF, PLL_FREQ_SEL);
+        uint32_t period_sel = FIELD_EX32(s->clock.cpuperconf, SYSTEM_CPU_PER_CONF, CPUPERIOD_SEL);
+
+        if (pll_freq_sel == ESP32S3_FREQ_SEL_PLL_480) {
+            /* 480 MHz PLL: divides to 240, 160, or 80 MHz */
+            switch (period_sel) {
+            case 0: cpu_freq_hz = 240000000; break;
+            case 1: cpu_freq_hz = 160000000; break;
+            default: cpu_freq_hz = 80000000; break;
+            }
+        } else {
+            /* 320 MHz PLL: divides to 160 or 80 MHz */
+            switch (period_sel) {
+            case 0: cpu_freq_hz = 160000000; break;
+            default: cpu_freq_hz = 80000000; break;
+            }
+        }
+    } else if (soc_clk_sel == ESP32S3_CLK_SEL_RCFAST) {
+        cpu_freq_hz = 17500000;
+    } else {
+        /* XTAL: 40 MHz */
+        cpu_freq_hz = 40000000;
+    }
+
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    for (int i = 0; i < ms->smp.cpus; ++i) {
+        CPUXtensaState *env = &s->cpu[i].env;
+        /* Snapshot current CCOUNT before changing clock rate to avoid discontinuity */
+        uint32_t cur_ccount = env->ccount_base +
+            (uint32_t)clock_ns_to_ticks(s->cpu[i].clock, now - env->time_base);
+        /* Update clock frequency */
+        clock_set_hz(s->cpu[i].clock, cpu_freq_hz);
+        /* Reset time base to now so future ticks use the new rate */
+        env->time_base = now;
+        env->ccount_base = cur_ccount;
+    }
+}
+
+static void esp32s3_cpu1_clk_stall(void* opaque, int n, int level)
+{
+    Esp32s3SocState *s = ESP32S3_SOC(opaque);
+    if (ESP32S3_CPU_COUNT > 1) {
+        bool stall = (level != 0);
+        if (stall != s->cpu[1].env.runstall) {
+            xtensa_runstall(&s->cpu[1].env, stall);
+        }
     }
 }
 
@@ -488,9 +556,16 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 
 static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
 {
-#if ESP32S3_IO_WARNING
-    warn_report("[ESP32-S3] Unsupported read to $%08lx, size = %i\n", ESP32S3_IO_START_ADDR + addr, size);
-#endif
+    /* The 0x6000E000 range contains undocumented timing/calibration registers
+     * used by the ROM bootloader. Offset 0x040 has bit 24 as a "done" status
+     * flag. Return only that bit to satisfy the done-check while keeping
+     * all other bits clear (for write-then-poll command completion). */
+    if (addr >= 0xE000 && addr < 0xF000) {
+        if ((addr & 0xFFF) == 0x040) {
+            return 0x01000000;  /* bit 24 set = done */
+        }
+        return 0;
+    }
     return 0;
 }
 
@@ -575,6 +650,8 @@ static void esp32s3_soc_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_cpu_reset,  ESP32S3_RTC_CPU_RESET_GPIO, ESP32S3_CPU_COUNT);
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_cpu_stall,  ESP32S3_RTC_CPU_STALL_GPIO, ESP32S3_CPU_COUNT);
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_clk_update, ESP32S3_RTC_CLK_UPDATE_GPIO, 1);
+    qdev_init_gpio_in_named(DEVICE(s), esp32s3_cpu1_clk_stall, ESP32S3_CLOCK_CPU1_STALL_GPIO, 1);
+    qdev_init_gpio_in_named(DEVICE(s), esp32s3_clk_update, ESP32S3_CLOCK_UPDATE_GPIO, 1);
 
     object_initialize_child(obj, "twai", &s->twai, TYPE_ESP32S3_TWAI);
 
@@ -762,6 +839,12 @@ static void esp32s3_machine_init(MachineState *machine)
             sysbus_connect_irq(SYS_BUS_DEVICE(&ss->clock), i,
                            qdev_get_gpio_in(intmatrix_dev, ETS_FROM_CPU_INTR0_SOURCE + i));
         }
+        /* Connect CPU 1 clock-gate stall control */
+        qdev_connect_gpio_out_named(DEVICE(&ss->clock), ESP32S3_CLOCK_CPU1_STALL_GPIO, 0,
+                                    qdev_get_gpio_in_named(DEVICE(ss), ESP32S3_CLOCK_CPU1_STALL_GPIO, 0));
+        /* Connect clock frequency update signal */
+        qdev_connect_gpio_out_named(DEVICE(&ss->clock), ESP32S3_CLOCK_UPDATE_GPIO, 0,
+                                    qdev_get_gpio_in_named(DEVICE(ss), ESP32S3_CLOCK_UPDATE_GPIO, 0));
     }
     /* Timer Groups realization */
     {
@@ -1115,6 +1198,11 @@ static void esp32s3_machine_init(MachineState *machine)
                 exit(1);
             }
             g_free(rom_binary);
+
+            /* Stall CPU 1 at startup, matching real hardware behavior.
+             * CPU 1 starts clock-gated and will be released by the app
+             * writing to SYSTEM_CORE_1_CONTROL_0_REG. */
+            xtensa_runstall(&ss->cpu[1].env, true);
         }
     }
 }
