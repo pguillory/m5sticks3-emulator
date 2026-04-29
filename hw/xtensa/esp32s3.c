@@ -125,6 +125,8 @@ static const struct MemmapEntry {
 #define ESP32S3_SOC_RESET_ALL       (ESP32S3_SOC_RESET_RTC | ESP32S3_SOC_RESET_DIG)
 
 #define ESP32S3_IO_WARNING  0
+#define ESP32S3_IO_STALL_DETECT  0
+#define ESP32S3_HEARTBEAT  0
 
 typedef struct Esp32s3SocState {
     /*< private >*/
@@ -185,6 +187,15 @@ typedef struct Esp32s3SocState {
     /* Backing store for the IO catch-all region so write-then-readback works */
 #define ESP32S3_IO_REG_COUNT (0xd1000 / sizeof(uint32_t))
     uint32_t *io_regs;
+
+    /* Shadow registers for REGI2C analog peripheral slave devices.
+     * The REGI2C interface (I2C_ANA_MST) provides access to analog blocks
+     * like the BBPLL. We model the slave register banks here so that
+     * read-after-write and configuration queries work correctly. */
+#define REGI2C_BBPLL_SLAVE_ADDR  0x66
+#define REGI2C_SLAVE_REG_COUNT   16
+    uint8_t regi2c_bbpll_regs[REGI2C_SLAVE_REG_COUNT];
+    uint32_t regi2c_last_cmd;  /* last command written to I2C_ANA_MST ctrl */
     MemoryRegion er_catchall[ESP32S3_CPU_COUNT];
     DWCSDMMCState sdmmc;
     DeviceState *eth;
@@ -322,19 +333,15 @@ static void esp32s3_clk_update(void* opaque, int n, int level)
         uint32_t pll_freq_sel = FIELD_EX32(s->clock.cpuperconf, SYSTEM_CPU_PER_CONF, PLL_FREQ_SEL);
         uint32_t period_sel = FIELD_EX32(s->clock.cpuperconf, SYSTEM_CPU_PER_CONF, CPUPERIOD_SEL);
 
-        if (pll_freq_sel == ESP32S3_FREQ_SEL_PLL_480) {
-            /* 480 MHz PLL: divides to 240, 160, or 80 MHz */
-            switch (period_sel) {
-            case 0: cpu_freq_hz = 240000000; break;
-            case 1: cpu_freq_hz = 160000000; break;
-            default: cpu_freq_hz = 80000000; break;
-            }
-        } else {
-            /* 320 MHz PLL: divides to 160 or 80 MHz */
-            switch (period_sel) {
-            case 0: cpu_freq_hz = 160000000; break;
-            default: cpu_freq_hz = 80000000; break;
-            }
+        /* CPUPERIOD_SEL mapping (per ESP-IDF / TRM):
+         *   0 → 80 MHz, 1 → 160 MHz, 2 → 240 MHz (480 MHz PLL only) */
+        switch (period_sel) {
+        case 2:
+            cpu_freq_hz = (pll_freq_sel == ESP32S3_FREQ_SEL_PLL_480)
+                        ? 240000000 : 160000000;
+            break;
+        case 1: cpu_freq_hz = 160000000; break;
+        default: cpu_freq_hz = 80000000; break;
         }
     } else if (soc_clk_sel == ESP32S3_CLK_SEL_RCFAST) {
         cpu_freq_hz = 17500000;
@@ -605,20 +612,89 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 }
 
 
+#if ESP32S3_HEARTBEAT
+/* Periodic heartbeat using wall-clock check in IO handlers.
+ * Since QEMU timers may not fire during tight CPU loops, we use a static
+ * wall-clock check instead. */
+static void esp32s3_heartbeat_check(Esp32s3SocState *s)
+{
+    static int64_t last_check_ns = 0;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    /* Check every 5 seconds of real time */
+    if (last_check_ns == 0) {
+        last_check_ns = now;
+        return;
+    }
+    if (now - last_check_ns < 5000000000LL) {
+        return;
+    }
+    last_check_ns = now;
+
+    CPUXtensaState *env = &s->cpu[0].env;
+    uint32_t pc = env->pc;
+    int64_t vtime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+
+    warn_report("[HEARTBEAT] real=+5s  vtime=%lld ms  PC=0x%08x",
+                (long long)vtime_ms, pc);
+}
+#endif
+
 static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
 {
     Esp32s3SocState *ss = (Esp32s3SocState *)opaque;
     uint32_t index = addr / sizeof(uint32_t);
 
-    /* The 0x6000E000 range contains undocumented timing/calibration registers
-     * used by the ROM bootloader. Offset 0x040 has bit 24 as a "done" status
-     * flag. Return only that bit to satisfy the done-check while keeping
-     * all other bits clear (for write-then-poll command completion). */
-    if (addr >= 0xE000 && addr < 0xF000) {
-        if ((addr & 0xFFF) == 0x040) {
-            return 0x01000000;  /* bit 24 set = done */
+#if ESP32S3_HEARTBEAT
+    esp32s3_heartbeat_check(ss);
+#endif
+
+#if ESP32S3_IO_STALL_DETECT
+    {
+        static hwaddr last_addr = 0;
+        static int repeat_count = 0;
+        static uint64_t total_reads = 0;
+        total_reads++;
+        /* Log every 10000 reads to show progress */
+        if (total_reads == 1 || total_reads % 10000 == 0) {
+            int64_t vtime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+            warn_report("[IO-READ] #%llu  addr=$%08lx  val=%08x  vtime=%lld ms",
+                        (unsigned long long)total_reads,
+                        (unsigned long)(ESP32S3_IO_START_ADDR + addr),
+                        (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) ?
+                        ss->io_regs[index] : 0,
+                        (long long)vtime_ms);
         }
-        return 0;
+        if (addr == last_addr) {
+            repeat_count++;
+            if (repeat_count == 100) {
+                uint32_t idx = addr / sizeof(uint32_t);
+                uint32_t val = (ss && ss->io_regs && idx < ESP32S3_IO_REG_COUNT) ?
+                               ss->io_regs[idx] : 0;
+                warn_report("[STALL] Polling $%08lx (returning %08x) %d+ times",
+                            (unsigned long)(ESP32S3_IO_START_ADDR + addr), val, repeat_count);
+            }
+        } else {
+            last_addr = addr;
+            repeat_count = 0;
+        }
+    }
+#endif
+
+    /* The 0x6000E000 range contains the I2C_ANA_MST (analog master) and
+     * related calibration registers used by ROM functions rom_i2c_readReg/
+     * rom_i2c_writeReg to access internal analog peripherals like the BBPLL. */
+    if (addr >= 0xE000 && addr < 0xF000) {
+        uint32_t off = addr & 0xFFF;
+        uint64_t ret;
+        if (off == 0x040) {
+            ret = 0x01000000;  /* bit 24 set = BBPLL_CAL_DONE */
+        } else if (off == 0x04C) {
+            ret = ss->io_regs[index];
+        } else {
+            ret = ss->io_regs[index];
+        }
+        return ret;
     }
 
     /* SENS (Sensor) block at 0x60008800: SAR ADC control registers.
@@ -638,8 +714,15 @@ static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
     }
 
 #if ESP32S3_IO_WARNING
-    if (poll_count < 5) {
-        warn_report("[ESP32-S3] Unsupported read $%08lx\n", (unsigned long)(ESP32S3_IO_START_ADDR + addr));
+    {
+        static int read_count = 0;
+        read_count++;
+        /* Log only every 10000th read to find what's being polled */
+        if (read_count % 10000 == 1) {
+            warn_report("[ESP32-S3] IO read #%d $%08lx => %08lx\n",
+                        read_count, (unsigned long)(ESP32S3_IO_START_ADDR + addr),
+                        (unsigned long)(ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT ? ss->io_regs[index] : 0));
+        }
     }
 #endif
     if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
@@ -648,6 +731,14 @@ static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
          * to simulate the SPI controller completing its operation. */
         if (addr == 0x3054) {
             ss->io_regs[index] = val & ~0x7;  /* Clear SPI_MEM_ST bits */
+        }
+        /* SPI0: Auto-clear SPI_MEM_CMD command bits on read.
+         * On real hardware, the SPI controller clears command bits when the
+         * operation completes. The firmware polls this register waiting for
+         * the command bit to go low. Also clear SPI_MEM_CMD at offset 0x008
+         * (which is sometimes the actual CMD register offset). */
+        if (addr == 0x3000 || addr == 0x3008) {
+            ss->io_regs[index] = 0;  /* All command bits cleared = idle */
         }
         return val;
     }
@@ -664,11 +755,59 @@ static void esp32s3_io_write(void *opaque, hwaddr addr, uint64_t value, unsigned
     Esp32s3SocState *ss = (Esp32s3SocState *)opaque;
     uint32_t index = addr / sizeof(uint32_t);
 
+#if ESP32S3_HEARTBEAT
+    esp32s3_heartbeat_check(ss);
+#endif
+
 #if ESP32S3_IO_WARNING
     warn_report("[ESP32-S3] Unsupported write $%08lx = %08lx\n", (unsigned long)(ESP32S3_IO_START_ADDR + addr), (unsigned long)value);
 #endif
     if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
         ss->io_regs[index] = (uint32_t)value;
+
+        /* REGI2C (I2C_ANA_MST): Handle I2C command register writes.
+         * The ROM functions rom_i2c_readReg/rom_i2c_writeReg access analog
+         * peripherals (BBPLL, SAR, etc.) through this register.
+         *
+         * Command format at offset 0x000 (absolute 0x6000E000):
+         *   bits [7:0]   = encoded slave/host identifier
+         *   bits [15:8]  = register address within slave
+         *   bits [23:16] = data (write value or read result)
+         *   bit  24      = write flag (1 = write, 0 = read)
+         *   bit  25      = busy flag (set by HW during transaction)
+         *   bit  26      = start/enable flag
+         *
+         * For read commands (bit 24 = 0), the hardware fills bits [23:16]
+         * with the read data when the transaction completes. We emulate
+         * this by maintaining shadow registers and populating the readback
+         * value immediately (instant completion). */
+        if (addr >= 0xE000 && addr < 0xF000) {
+            uint32_t off = addr & 0xFFF;
+
+            if (off == 0x000) {
+                uint8_t reg_addr = (value >> 8) & 0xFF;
+                uint8_t wr_data = (value >> 16) & 0xFF;
+                bool is_write = (value >> 24) & 1;
+
+                if (is_write) {
+                    /* Write command: update shadow register */
+                    if (reg_addr < REGI2C_SLAVE_REG_COUNT) {
+                        ss->regi2c_bbpll_regs[reg_addr] = wr_data;
+                    }
+                } else {
+                    /* Read command: populate bits [23:16] with shadow value */
+                    uint8_t rd_data = 0;
+                    if (reg_addr < REGI2C_SLAVE_REG_COUNT) {
+                        rd_data = ss->regi2c_bbpll_regs[reg_addr];
+                    }
+                    ss->io_regs[index] = (ss->io_regs[index] & ~(0xFFu << 16))
+                                       | ((uint32_t)rd_data << 16);
+                }
+                /* Clear busy flag (bit 25) — transaction completes instantly */
+                ss->io_regs[index] &= ~(1u << 25);
+            }
+
+        }
 
         /* SPI0 (MSPI): When a command is written to SPI_MEM_CMD (offset 0x00),
          * configuration registers are changed, or timing calibration registers
@@ -842,6 +981,15 @@ static void esp32s3_machine_init(MachineState *machine)
      * has LOCK_DELAY_TIME=4 at bits [11:7], giving default value 0x200.
      * SPI_MEM_ST (bits [2:0]) reflects FSM state. */
     ss->io_regs[(0x3000 + 0x054) / sizeof(uint32_t)] = 0x200;
+
+    /* Initialize REGI2C BBPLL shadow registers with 480 MHz PLL defaults.
+     * Register 2 (I2C_BBPLL_OC_REF_DIV, bits [3:0]) controls the PLL
+     * reference divider.  ESP-IDF's clk_ll_bbpll_get_freq_mhz() reads this
+     * to determine the PLL frequency: 8 → 480 MHz, 2 → 320 MHz.
+     * Without this, the read returns 0 and the frequency calculation
+     * divides by zero. */
+    ss->regi2c_bbpll_regs[2] = 8;  /* OC_REF_DIV = 8 → 480 MHz */
+
     memory_region_init_io(&ss->iomem, OBJECT(&ss->cpu[0]), &esp32s3_io_ops,
                           ss, "esp32s3.iomem", 0xd1000);
     /* Use overlap with low priority (-1) so that specific device models
@@ -1330,6 +1478,8 @@ static void esp32s3_machine_init(MachineState *machine)
             xtensa_runstall(&ss->cpu[1].env, true);
         }
     }
+
+    /* Heartbeat check is done inline in IO read handlers now */
 }
 
 

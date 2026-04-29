@@ -32,9 +32,10 @@
 
 /**
  * Values for SYSTEM_PLL_FREQ_SEL
+ * Per ESP32-S3 TRM and ESP-IDF: 0 = 320 MHz, 1 = 480 MHz
  */
-#define ESP32S3_FREQ_SEL_PLL_480    0
-#define ESP32S3_FREQ_SEL_PLL_320    1
+#define ESP32S3_FREQ_SEL_PLL_320    0
+#define ESP32S3_FREQ_SEL_PLL_480    1
 
 /**
  * Values for SYSTEM_CPUPERIOD_SEL

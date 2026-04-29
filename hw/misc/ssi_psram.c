@@ -17,7 +17,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/misc/ssi_psram.h"
 
-#define PSRAM_WARNING   0
+#define PSRAM_WARNING   1
 
 
 typedef enum PsramCMD {

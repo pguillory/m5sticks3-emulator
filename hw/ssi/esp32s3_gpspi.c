@@ -335,6 +335,12 @@ static void esp32s3_gpspi_write(void *opaque, hwaddr addr,
     switch (addr) {
     case A_GPSPI_CMD:
         s->cmd = wval;
+
+        /* UPDATE (bit 24) and CONF_BITLEN (bit 23) are auto-clear bits.
+         * Hardware applies the configuration immediately and clears them.
+         * Clear them so firmware polling loops don't spin forever. */
+        s->cmd &= ~(R_GPSPI_CMD_UPDATE_MASK | R_GPSPI_CMD_CONF_BITLEN_MASK);
+
         if (wval & R_GPSPI_CMD_USR_MASK) {
             esp32s3_gpspi_begin_transaction(s);
         }

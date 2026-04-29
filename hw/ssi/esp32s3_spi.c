@@ -22,7 +22,7 @@
 #include "qemu/error-report.h"
 
 #define SPI1_DEBUG      0
-#define SPI1_WARNING    0
+#define SPI1_WARNING    1
 
 
 enum {

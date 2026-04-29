@@ -38,6 +38,7 @@
 #include "exec/helper-proto-common.h"
 #include "tb-jmp-cache.h"
 #include "tb-hash.h"
+#include "qemu/timer.h"
 #include "tb-context.h"
 #include "internal-common.h"
 #include "internal-target.h"

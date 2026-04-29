@@ -60,9 +60,35 @@ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
             break;
         case A_SYSTEM_CPU_PER_CONF:
             r = s->cpuperconf;
+#if CLOCK_DEBUG
+            {
+                static int cpc_rd = 0;
+                if (++cpc_rd <= 50) {
+                    warn_report("[CLOCK] CPU_PER_CONF read #%d => 0x%08x (CPUPERIOD_SEL=%d PLL_FREQ_SEL=%d)",
+                                cpc_rd, (uint32_t)r,
+                                FIELD_EX32(r, SYSTEM_CPU_PER_CONF, CPUPERIOD_SEL),
+                                FIELD_EX32(r, SYSTEM_CPU_PER_CONF, PLL_FREQ_SEL));
+                }
+            }
+#endif
             break;
         case A_SYSTEM_SYSCLK_CONF:
             r = s->sysclk;
+            /* Ensure CLK_XTAL_FREQ always reports the true crystal frequency
+             * (40 MHz). The ROM may overwrite this field with 0 if its crystal
+             * frequency detection fails in emulation. */
+            r = FIELD_DP32(r, SYSTEM_SYSCLK_CONF, CLK_XTAL_FREQ, 40);
+#if CLOCK_DEBUG
+            {
+                static int sc_rd = 0;
+                if (++sc_rd <= 50) {
+                    warn_report("[CLOCK] SYSCLK_CONF read #%d => 0x%08x (SOC_CLK_SEL=%d PRE_DIV_CNT=%d)",
+                                sc_rd, (uint32_t)r,
+                                FIELD_EX32(r, SYSTEM_SYSCLK_CONF, SOC_CLK_SEL),
+                                FIELD_EX32(r, SYSTEM_SYSCLK_CONF, PRE_DIV_CNT));
+                }
+            }
+#endif
             break;
         case A_SYSTEM_CPU_INTR_FROM_CPU_0:
         case A_SYSTEM_CPU_INTR_FROM_CPU_1:
@@ -124,10 +150,32 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
             esp32s3_write_cpu_intr(s, (addr - A_SYSTEM_CPU_INTR_FROM_CPU_0) / sizeof(uint32_t), value);
             break;
         case A_SYSTEM_CPU_PER_CONF:
+#if CLOCK_DEBUG
+            {
+                static int cpc_wr = 0;
+                if (++cpc_wr <= 50) {
+                    warn_report("[CLOCK] CPU_PER_CONF write #%d: 0x%08x => 0x%08x (CPUPERIOD_SEL=%d PLL_FREQ_SEL=%d)",
+                                cpc_wr, (uint32_t)s->cpuperconf, (uint32_t)value,
+                                FIELD_EX32(value, SYSTEM_CPU_PER_CONF, CPUPERIOD_SEL),
+                                FIELD_EX32(value, SYSTEM_CPU_PER_CONF, PLL_FREQ_SEL));
+                }
+            }
+#endif
             s->cpuperconf = (uint32_t)value;
             qemu_set_irq(s->clk_update, 1);
             break;
         case A_SYSTEM_SYSCLK_CONF:
+#if CLOCK_DEBUG
+            {
+                static int sc_wr = 0;
+                if (++sc_wr <= 50) {
+                    warn_report("[CLOCK] SYSCLK_CONF write #%d: 0x%08x => 0x%08x (SOC_CLK_SEL=%d PRE_DIV_CNT=%d)",
+                                sc_wr, (uint32_t)s->sysclk, (uint32_t)value,
+                                FIELD_EX32(value, SYSTEM_SYSCLK_CONF, SOC_CLK_SEL),
+                                FIELD_EX32(value, SYSTEM_SYSCLK_CONF, PRE_DIV_CNT));
+                }
+            }
+#endif
             s->sysclk = (uint32_t)value;
             qemu_set_irq(s->clk_update, 1);
             break;
