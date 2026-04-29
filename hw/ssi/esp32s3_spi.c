@@ -381,12 +381,14 @@ static void esp32s3_spi_write(void *opaque, hwaddr addr,
 
     switch (addr) {
         case A_SPI_MEM_CMD:
+        {
             if(wvalue & R_SPI_MEM_CMD_USR_MASK) {
                 esp32s3_spi_begin_transaction(s);
             } else {
                 esp32s3_spi_special_command(s, wvalue);
             }
             break;
+        }
         case A_SPI_MEM_ADDR:
             s->mem_addr = wvalue;
             break;

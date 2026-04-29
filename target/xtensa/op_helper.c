@@ -42,8 +42,18 @@ void HELPER(update_ccount)(CPUXtensaState *env)
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     env->ccount_time = now;
-    env->sregs[CCOUNT] = env->ccount_base +
+    uint32_t new_ccount = env->ccount_base +
         (uint32_t)clock_ns_to_ticks(cpu->clock, now - env->time_base);
+
+    /* Guarantee monotonic advancement: if virtual time hasn't advanced enough
+     * to tick CCOUNT forward, force a minimum increment. This prevents tight
+     * rsr.ccount delay loops (like ets_delay_us in ROM) from hanging when
+     * virtual time doesn't advance between TB executions — a common situation
+     * in TCG without icount mode. */
+    if ((int32_t)(new_ccount - env->sregs[CCOUNT]) <= 0) {
+        new_ccount = env->sregs[CCOUNT] + 1;
+    }
+    env->sregs[CCOUNT] = new_ccount;
 }
 
 void HELPER(wsr_ccount)(CPUXtensaState *env, uint32_t v)

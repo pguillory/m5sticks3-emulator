@@ -68,6 +68,10 @@ typedef struct ESP32S3ClockState {
     qemu_irq clk_update;
 
     uint32_t sys_ext_dev_enc_dec_ctrl;
+
+    /* Generic register storage for peripheral clock/reset enables etc. */
+#define ESP32S3_CLOCK_REG_COUNT (0xA4 / sizeof(uint32_t))
+    uint32_t regs[ESP32S3_CLOCK_REG_COUNT];
 } ESP32S3ClockState;
 
 typedef struct ESP32S3ClockClass {

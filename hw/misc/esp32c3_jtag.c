@@ -20,7 +20,18 @@ static uint64_t esp32c3_jtag_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
     (void) s;
-    return 0;
+
+    switch (addr) {
+    case 0x04:
+        /* USB_SERIAL_JTAG_EP1_CONF_REG:
+         * Bit 2 (SERIAL_IN_EP_DATA_FREE): Return 1 to indicate the
+         * serial-in endpoint is free (ready to accept data).
+         * Bit 1 (SERIAL_OUT_EP_DATA_AVAIL): Return 0 — no JTAG download
+         * data pending (setting this would enter download mode). */
+        return (1 << 2);
+    default:
+        return 0;
+    }
 }
 
 static void esp32c3_jtag_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)

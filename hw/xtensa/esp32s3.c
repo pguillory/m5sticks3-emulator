@@ -181,6 +181,10 @@ typedef struct Esp32s3SocState {
     Esp32s3BleState ble;
 
     MemoryRegion iomem;
+    /* Backing store for the IO catch-all region so write-then-readback works */
+#define ESP32S3_IO_REG_COUNT (0xd1000 / sizeof(uint32_t))
+    uint32_t *io_regs;
+    MemoryRegion er_catchall[ESP32S3_CPU_COUNT];
     DWCSDMMCState sdmmc;
     DeviceState *eth;
     SsiPsramState *psram;
@@ -196,6 +200,38 @@ typedef struct Esp32s3SocState {
  * QEMU or on real hardware */
 #define RGB_QEMU_ORIGIN     0x51454d55
 #define RGB_QEMU_ORIGIN_REG 0x3F8
+
+/*
+ * ESP32-S3 External Register (ER) space catch-all.
+ *
+ * The ER address space (accessed via RER/WER instructions) contains
+ * core-local peripherals like the WORLD controller, PMS, and debug
+ * registers. The bootloader probes addresses like 0x10200C (WORLD
+ * controller) early in boot. Without a handler, these reads get
+ * "rejected" which returns garbage and can hang the boot.
+ *
+ * This provides a simple RAM-backed catch-all so any ER read returns 0
+ * (safe default = "no protection / default config") and writes are absorbed.
+ */
+#define ESP32S3_ER_CATCHALL_BASE  0x0
+#define ESP32S3_ER_CATCHALL_SIZE  0x200000  /* 2MB covers all known ER addrs */
+
+static uint64_t esp32s3_er_read(void *opaque, hwaddr addr, unsigned int size)
+{
+    return 0;
+}
+
+static void esp32s3_er_write(void *opaque, hwaddr addr,
+                             uint64_t value, unsigned int size)
+{
+    /* Silently absorb writes */
+}
+
+static const MemoryRegionOps esp32s3_er_ops = {
+    .read = esp32s3_er_read,
+    .write = esp32s3_er_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
 
 static void remove_cpu_watchpoints(XtensaCPU* xcs)
 {
@@ -488,6 +524,20 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 
     for (int i = 0; i < ms->smp.cpus; ++i) {
         qdev_realize(DEVICE(&s->cpu[i]), NULL, &error_fatal);
+
+        /* Map ER space catch-all for WORLD controller, PMS, etc. */
+        {
+            char er_name[32];
+            CPUXtensaState *env = &s->cpu[i].env;
+            snprintf(er_name, sizeof(er_name), "esp32s3.er-catchall.%d", i);
+            memory_region_init_io(&s->er_catchall[i], OBJECT(dev),
+                                  &esp32s3_er_ops, s, er_name,
+                                  ESP32S3_ER_CATCHALL_SIZE);
+            memory_region_add_subregion_overlap(
+                xtensa_get_er_region(env),
+                ESP32S3_ER_CATCHALL_BASE,
+                &s->er_catchall[i], -1);  /* low priority so specific handlers win */
+        }
     }
 
 
@@ -556,6 +606,9 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 
 static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
 {
+    Esp32s3SocState *ss = (Esp32s3SocState *)opaque;
+    uint32_t index = addr / sizeof(uint32_t);
+
     /* The 0x6000E000 range contains undocumented timing/calibration registers
      * used by the ROM bootloader. Offset 0x040 has bit 24 as a "done" status
      * flag. Return only that bit to satisfy the done-check while keeping
@@ -566,15 +619,67 @@ static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
         }
         return 0;
     }
+
+    /* SENS (Sensor) block at 0x60008800: SAR ADC control registers.
+     * SAR_MEAS1_CTRL2_REG (offset 0x0c) and SAR_MEAS2_CTRL2_REG (offset 0x30)
+     * each have a "measurement done" status bit at bit 16. The firmware polls
+     * these during ADC/temperature sensor reads. Since we don't model the ADC,
+     * always report measurements as instantly complete. */
+    if (addr >= 0x8800 && addr < 0x8900) {
+        uint32_t sens_off = addr - 0x8800;
+        if (sens_off == 0x0c || sens_off == 0x30) {
+            uint32_t val = 0;
+            if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
+                val = ss->io_regs[index];
+            }
+            return val | (1u << 16);  /* measurement done */
+        }
+    }
+
+#if ESP32S3_IO_WARNING
+    if (poll_count < 5) {
+        warn_report("[ESP32-S3] Unsupported read $%08lx\n", (unsigned long)(ESP32S3_IO_START_ADDR + addr));
+    }
+#endif
+    if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
+        uint32_t val = ss->io_regs[index];
+        /* SPI0: After reading FSM register, auto-clear the FSM state bits
+         * to simulate the SPI controller completing its operation. */
+        if (addr == 0x3054) {
+            ss->io_regs[index] = val & ~0x7;  /* Clear SPI_MEM_ST bits */
+        }
+        return val;
+    }
     return 0;
 }
 
 
+/* SPI0 FSM register indices for the IO backing store */
+#define SPI0_FSM_INDEX ((0x3000 + 0x054) / sizeof(uint32_t))
+#define SPI0_CMD_INDEX ((0x3000 + 0x000) / sizeof(uint32_t))
+
 static void esp32s3_io_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
 {
+    Esp32s3SocState *ss = (Esp32s3SocState *)opaque;
+    uint32_t index = addr / sizeof(uint32_t);
+
 #if ESP32S3_IO_WARNING
-        warn_report("[ESP32-S3] Unsupported write $%08lx = %08lx\n", ESP32S3_IO_START_ADDR + addr, value);
+    warn_report("[ESP32-S3] Unsupported write $%08lx = %08lx\n", (unsigned long)(ESP32S3_IO_START_ADDR + addr), (unsigned long)value);
 #endif
+    if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
+        ss->io_regs[index] = (uint32_t)value;
+
+        /* SPI0 (MSPI): When a command is written to SPI_MEM_CMD (offset 0x00),
+         * configuration registers are changed, or timing calibration registers
+         * at 0x6000E000 are written, simulate a brief FSM busy period by
+         * setting SPI_MEM_ST bits [2:0] in the FSM register.
+         * This satisfies the bootloader's timing tuning polling loop. */
+        if ((addr >= 0x3000 && addr < 0x3100 && addr != 0x3054) ||
+            (addr >= 0xE000 && addr < 0xF000)) {
+            /* Set FSM state to 1 ("preparation") to indicate busy */
+            ss->io_regs[SPI0_FSM_INDEX] = (ss->io_regs[SPI0_FSM_INDEX] & ~0x7) | 1;
+        }
+    }
 }
 
 
@@ -730,9 +835,19 @@ static void esp32s3_machine_init(MachineState *machine)
     memory_region_add_subregion(sys_mem, memmap[ESP32S3_MEMREGION_DRAM].base, dram);
 
 
+    ss->io_regs = g_new0(uint32_t, ESP32S3_IO_REG_COUNT);
+    /* Set hardware defaults for unmapped peripheral registers.
+     * SPI0 (MSPI) at 0x60003000: SPI_MEM_FSM_REG (offset 0x54)
+     * has LOCK_DELAY_TIME=4 at bits [11:7], giving default value 0x200.
+     * SPI_MEM_ST (bits [2:0]) reflects FSM state. */
+    ss->io_regs[(0x3000 + 0x054) / sizeof(uint32_t)] = 0x200;
     memory_region_init_io(&ss->iomem, OBJECT(&ss->cpu[0]), &esp32s3_io_ops,
-                          NULL, "esp32s3.iomem", 0xd1000);
-    memory_region_add_subregion(sys_mem, ESP32S3_IO_START_ADDR, &ss->iomem);
+                          ss, "esp32s3.iomem", 0xd1000);
+    /* Use overlap with low priority (-1) so that specific device models
+     * (SHA, AES, UART, etc.) at priority 0 take precedence over this
+     * catch-all handler for their address ranges. */
+    memory_region_add_subregion_overlap(sys_mem, ESP32S3_IO_START_ADDR,
+                                        &ss->iomem, -1);
 
     // qdev_prop_set_chr(DEVICE(ss), "serial0", serial_hd(0));
     // qdev_prop_set_chr(DEVICE(ss), "serial1", serial_hd(1));
@@ -815,6 +930,14 @@ static void esp32s3_machine_init(MachineState *machine)
         sysbus_realize(SYS_BUS_DEVICE(&ss->cache), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->cache), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_EXTMEM_BASE, mr, 0);
+
+        /* The ROM bootloader accesses the cache controller at 0x60040000
+         * (PeriBus1), while ESP-IDF uses 0x600C4000 (PeriBus2). Add an
+         * alias at the PeriBus1 address so the ROM can configure the cache. */
+        MemoryRegion *cache_alias = g_new(MemoryRegion, 1);
+        memory_region_init_alias(cache_alias, OBJECT(ss), "extmem-alias",
+                                 mr, 0, memory_region_size(mr));
+        memory_region_add_subregion_overlap(sys_mem, 0x60040000, cache_alias, 1);
 
         memory_region_add_subregion(sys_mem, memmap[ESP32S3_MEMREGION_DCACHE].base, &ss->cache.dcache);
         memory_region_add_subregion(sys_mem, memmap[ESP32S3_MEMREGION_ICACHE].base, &ss->cache.icache);

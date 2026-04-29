@@ -407,9 +407,6 @@ static IOMMUTLBEntry esp32s3_mmu_region_translate(IOMMUMemoryRegion *iommu, hwad
         ret.perm = (s->flash_blk == NULL) ? IOMMU_NONE : IOMMU_RO;
     }
 
-#if CACHE_DEBUG
-    info_report("[Cache] Translate virtual address %08lx to %08lx (idx: %d, val: %x, offset: %08x)\x1b[0m\n", ret.iova, ret.translated_addr, index, entry.val, offset);
-#endif
     return ret;
 }
 

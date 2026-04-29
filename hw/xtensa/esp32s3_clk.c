@@ -74,10 +74,16 @@ static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
             r = s->sys_ext_dev_enc_dec_ctrl;
             break;
         default:
+        {
+            uint32_t index = addr / sizeof(uint32_t);
+            if (index < ESP32S3_CLOCK_REG_COUNT) {
+                r = s->regs[index];
+            }
 #if CLOCK_WARNING
             warn_report("[CLOCK] Unsupported read from %08lx\n", addr);
 #endif
             break;
+        }
     }
     return r;
 }
@@ -90,7 +96,7 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
     switch(addr) {
         case A_SYSTEM_CORE_1_CONTROL_0_REG:
             s->core1_ctrl0 = (uint32_t)value;
-            /* Bit 0: CLKGATE_EN, Bit 1: RUNSTALL
+            /* Bit 0: CLKGATE_EN, Bit 1: RUNSTALL, Bit 2: RESETING
              * When CLKGATE_EN=1 and RUNSTALL=0, CPU 1 is released */
             {
                 bool stall = !(value & 0x1) || (value & 0x2);
@@ -99,6 +105,17 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
             break;
         case A_SYSTEM_CORE_1_CONTROL_1_REG:
                 s->app_cpu_addr = (uint32_t)value;
+                /* On real ESP32-S3, writing a non-zero entry point triggers
+                 * CPU1 startup: the hardware automatically enables the clock
+                 * gate and clears RUNSTALL so CPU1 begins executing from its
+                 * reset-vector polling loop (ROM code reads the entry point
+                 * from this register and jumps to it).
+                 * The firmware never explicitly clears RUNSTALL after setting
+                 * the entry point — it relies on this hardware behavior. */
+                if (value != 0) {
+                    s->core1_ctrl0 = (s->core1_ctrl0 | 0x1) & ~0x2u;
+                    qemu_set_irq(s->cpu1_stall, 0);
+                }
             break;
         case A_SYSTEM_CPU_INTR_FROM_CPU_0:
         case A_SYSTEM_CPU_INTR_FROM_CPU_1:
@@ -118,10 +135,16 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
             s->sys_ext_dev_enc_dec_ctrl = value;
             break;
         default:
+        {
+            uint32_t index = addr / sizeof(uint32_t);
+            if (index < ESP32S3_CLOCK_REG_COUNT) {
+                s->regs[index] = (uint32_t)value;
+            }
 #if CLOCK_WARNING
             warn_report("[CLOCK] Unsupported write to %08lx (%08lx)\n", addr, value);
 #endif
             break;
+        }
     }
 }
 

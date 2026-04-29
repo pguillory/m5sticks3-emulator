@@ -208,7 +208,8 @@ static const FlashPartInfo known_devices[] = {
 
     /* GigaDevice */
     { INFO("gd25q32",     0xc84016,      0,  64 << 10,  64, ER_4K) },
-    { INFO("gd25q64",     0xc84017,      0,  64 << 10, 128, ER_4K) },
+    { INFO("gd25q64",     0xc84017,      0,  64 << 10, 128, ER_4K),
+      .sfdp_read = m25p80_sfdp_gd25q64 },
 
     /* Intel/Numonyx -- xxxs33b */
     { INFO("160s33b",     0x898911,      0,  64 << 10,  32, 0) },
@@ -448,6 +449,14 @@ typedef enum {
     WEVCR = 0x61,
 
     DIE_ERASE = 0xC4,
+
+    /*
+     * ESP32-S3 bootloader sends these during flash probing.
+     * 0x77 = Set Burst with Wrap (configures wrap length for cache reads)
+     * 0x7A = proprietary/vendor command used during flash init
+     */
+    SET_BURST_WRAP = 0x77,
+    VENDOR_PROBE_7A = 0x7a,
 } FlashCMD;
 
 typedef enum {
@@ -1544,6 +1553,31 @@ static void decode_new_cmd(Flash *s, uint32_t value)
             break;
         }
         /* Fallthrough */
+
+    case SET_BURST_WRAP:
+        /*
+         * Set Burst with Wrap (0x77): configures wrap length for continuous
+         * reads. The ESP32-S3 bootloader sends this to optimize cache line
+         * fetches. Accept and ignore — the emulator doesn't need wrap mode.
+         * Consumes 3 dummy bytes + 1 data byte per the GD25Q64 datasheet.
+         */
+        s->needed_bytes = 4;
+        s->pos = 0;
+        s->len = 0;
+        s->state = STATE_COLLECTING_DATA;
+        break;
+
+    case VENDOR_PROBE_7A:
+        /*
+         * Vendor probe command (0x7A): sent by ESP32-S3 bootloader during
+         * flash identification. Return 0x00 data (unknown/unsupported).
+         */
+        s->pos = 0;
+        s->len = 1;
+        s->state = STATE_READING_DATA;
+        s->data_read_loop = true;
+        s->data[0] = 0;
+        break;
 
     default:
         s->pos = 0;

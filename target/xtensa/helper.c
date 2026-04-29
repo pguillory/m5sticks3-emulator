@@ -323,6 +323,11 @@ void xtensa_runstall(CPUXtensaState *env, bool runstall)
     if (runstall) {
         cpu_interrupt(cpu, CPU_INTERRUPT_HALT);
     } else {
+        /* Clear the HALT interrupt flag so cpu_handle_interrupt() in the
+         * TCG exec loop doesn't immediately re-halt the CPU.  Without this,
+         * the stale CPU_INTERRUPT_HALT from the stall phase causes the CPU
+         * to set halted=1 again before executing any instructions. */
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_HALT);
         qemu_cpu_kick(cpu);
     }
 }
