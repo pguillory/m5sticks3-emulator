@@ -75,6 +75,7 @@
 #include "hw/display/st7789v2.h"
 #include "hw/audio/esp32s3_i2s.h"
 #include "hw/audio/es8311.h"
+#include "hw/misc/axp2101.h"
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/misc/esp32s3_wifi.h"
 #include "hw/misc/esp32s3_wifi_net.h"
@@ -1097,9 +1098,10 @@ static void esp32s3_machine_init(MachineState *machine)
         sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2c[0]), 0,
                            qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE));
 
-        /* Attach ES8311 audio codec to I2C0 bus */
+        /* Attach I2C slave devices to I2C0 bus */
         I2CBus *i2c_bus = I2C_BUS(qdev_get_child_bus(DEVICE(&ss->i2c[0]), "i2c"));
         i2c_slave_create_simple(i2c_bus, TYPE_ES8311, ES8311_I2C_ADDR);
+        i2c_slave_create_simple(i2c_bus, TYPE_AXP2101, AXP2101_I2C_ADDR);
     }
 
     /* I2C1 controller */
