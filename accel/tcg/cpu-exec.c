@@ -947,6 +947,12 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 #endif
 }
 
+/* Global SHA operation counter from hw/misc/esp_sha.c */
+extern uint32_t g_sha_op_count;
+
+#include "qemu/error-report.h"
+#include <time.h>
+
 /* main execution loop */
 
 static int __attribute__((noinline))
@@ -966,6 +972,18 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             uint32_t flags, cflags;
 
             cpu_get_tb_cpu_state(cpu_env(cpu), &pc, &cs_base, &flags);
+
+            /* Periodic PC trace: log current PC every 1M TBs */
+            {
+                static uint64_t tb_count = 0;
+                tb_count++;
+                if ((tb_count & 0xFFFFF) == 0) {  /* every ~1M TBs */
+                    warn_report("[CPU-EXEC] pc=0x%08x tb=%lluM sha=%u",
+                                (uint32_t)pc,
+                                (unsigned long long)(tb_count >> 20),
+                                g_sha_op_count);
+                }
+            }
 
             /*
              * When requested, use an exact setting for cflags for the next

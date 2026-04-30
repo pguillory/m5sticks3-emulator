@@ -38,6 +38,25 @@ typedef struct Esp32I2CState {
     uint32_t stop_hold_reg;
     uint32_t stop_setup_reg;
     uint32_t cmd_reg[ESP32_I2C_CMD_COUNT];
+    uint8_t port_num;   /* 0 or 1, for debug logging */
+
+    /*
+     * Deferred IRQ timer.
+     *
+     * On real hardware, I2C transactions take many clock cycles.  The firmware
+     * polls INT_RAW for END_DETECT, processes the result, and then (optionally)
+     * an ISR fires and clears the flag.  In the emulator, transactions execute
+     * synchronously inside the MMIO write that sets TRANS_START.  Without a
+     * delay, the ISR fires immediately (at the next TB boundary) and clears
+     * END_DETECT before the polling loop can see it.  This causes LGFX's
+     * i2c_wait() to think the transaction failed, triggering a force-STOP
+     * that aborts the read.
+     *
+     * To fix: set INT_RAW bits immediately (so polling sees them), but defer
+     * the IRQ assertion via this timer.  The polling loop reads INT_RAW and
+     * processes the result before the ISR runs.
+     */
+    QEMUTimer *irq_timer;
 } Esp32I2CState;
 
 
@@ -98,15 +117,18 @@ REG32(I2C_CMD, 0x58);
 /* 15 more command registers omitted */
 
 /* I2C_CMD.OPCODE values
- * Note: ESP32 uses opcode 0 for RSTART; ESP32-S3 uses opcode 6 for RSTART.
- * Both are handled in the transaction logic. */
+ * Note: ESP32 vs ESP32-S3 opcode differences:
+ *   ESP32:    RSTART=0, WRITE=1, READ=2, STOP=3, END=4
+ *   ESP32-S3: RSTART=6, WRITE=1, STOP=2, READ=3, END=4
+ * Both RSTART opcodes are handled; READ/STOP use S3 values since
+ * this emulator targets ESP32-S3. */
 typedef enum {
-    I2C_OPCODE_RSTART     = 0,
+    I2C_OPCODE_RSTART     = 0,   /* ESP32 RSTART */
     I2C_OPCODE_WRITE      = 1,
-    I2C_OPCODE_READ       = 2,
-    I2C_OPCODE_STOP       = 3,
+    I2C_OPCODE_STOP       = 2,   /* ESP32-S3 (ESP32 uses 3) */
+    I2C_OPCODE_READ       = 3,   /* ESP32-S3 (ESP32 uses 2) */
     I2C_OPCODE_END        = 4,
-    I2C_OPCODE_RSTART_S3  = 6,  /* ESP32-S3 uses opcode 6 for RSTART */
+    I2C_OPCODE_RSTART_S3  = 6,   /* ESP32-S3 RSTART */
 } i2c_opcode_t;
 
 #endif /* ESP32_I2C_H */

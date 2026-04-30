@@ -176,6 +176,11 @@ typedef struct Esp32s3BleState {
     /* Flag: has nimble_port_run been entered? */
     bool nimble_running;
 
+    /* Read-as-written register file for BLE controller hardware registers.
+     * The BLE controller init code does read-modify-write on various config
+     * registers. Without this, reads return 0 and the init asserts. */
+    uint32_t hw_regs[ESP32S3_BLE_MMIO_SIZE / sizeof(uint32_t)];
+
 } Esp32s3BleState;
 
 /* Global BLE state (one per machine) */

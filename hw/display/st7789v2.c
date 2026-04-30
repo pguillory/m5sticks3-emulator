@@ -25,7 +25,7 @@
 #include "hw/display/st7789v2.h"
 
 #define ST7789_DEBUG   0
-#define ST7789_WARNING 0
+#define ST7789_WARNING 1
 
 
 /*
@@ -425,7 +425,14 @@ static void st7789v2_class_init(ObjectClass *klass, void *data)
 
     ssc->realize = st7789v2_realize;
     ssc->transfer = st7789v2_transfer;
-    ssc->cs_polarity = SSI_CS_LOW;
+    /*
+     * Use SSI_CS_NONE so the display always receives SPI traffic.
+     * The real firmware manages CS via GPIO 41 (not through the SPI
+     * controller's built-in CS pins), so the SSI framework's CS
+     * gating would block all transfers.  With only one device on the
+     * bus, CS gating isn't needed for correctness.
+     */
+    ssc->cs_polarity = SSI_CS_NONE;
     rc->phases.hold = st7789v2_reset_hold;
 }
 

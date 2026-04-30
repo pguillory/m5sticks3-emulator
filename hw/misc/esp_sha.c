@@ -22,6 +22,10 @@
 #define SHA_WARNING 0
 #define SHA_DEBUG 0
 
+/* Global SHA operation counter, readable from other modules (e.g. cpu-exec.c)
+ * to trigger post-verification diagnostics. */
+uint32_t g_sha_op_count = 0;
+
 static ESPHashAlg esp_sha_algs[] = {
     [ESP_SHA_1_MODE]    = {
         .init     = (hash_init) sha1_init,
@@ -256,12 +260,22 @@ static void esp_sha_write(void *opaque, hwaddr addr,
     case A_SHA_START:
         if (FIELD_EX32(value, SHA_START, START)) {
             class->sha_start(s, OP_START, s->mode, s->message, s->hash);
+            s->op_count++;
+            g_sha_op_count = s->op_count;
+            if (s->op_count <= 3 || s->op_count % 10000 == 0) {
+                info_report("[SHA] op #%u (START)", s->op_count);
+            }
         }
         break;
 
     case A_SHA_CONTINUE:
         if (FIELD_EX32(value, SHA_CONTINUE, CONTINUE)) {
             class->sha_start(s, OP_CONTINUE, s->mode, s->message, s->hash);
+            s->op_count++;
+            g_sha_op_count = s->op_count;
+            if (s->op_count <= 3 || s->op_count % 10000 == 0) {
+                info_report("[SHA] op #%u (CONTINUE)", s->op_count);
+            }
         }
         break;
 

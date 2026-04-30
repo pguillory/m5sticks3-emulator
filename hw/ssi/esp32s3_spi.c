@@ -382,6 +382,13 @@ static void esp32s3_spi_write(void *opaque, hwaddr addr,
     switch (addr) {
         case A_SPI_MEM_CMD:
         {
+            static uint32_t spi1_cmd_count = 0;
+            spi1_cmd_count++;
+            if (spi1_cmd_count <= 5 || spi1_cmd_count % 10000 == 0) {
+                info_report("[SPI1] CMD #%u: value=0x%08x addr=0x%08x user2=0x%08x",
+                            spi1_cmd_count, wvalue, s->mem_addr,
+                            s->mem_user2);
+            }
             if(wvalue & R_SPI_MEM_CMD_USR_MASK) {
                 esp32s3_spi_begin_transaction(s);
             } else {

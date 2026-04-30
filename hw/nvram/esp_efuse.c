@@ -336,13 +336,22 @@ static uint64_t esp_efuse_read(void *opaque, hwaddr addr, unsigned int size)
             base = ((uint8_t*) (&s->efuses.blocks.rd_wr_dis)) + addr - A_EFUSE_RD_WR_DIS_REG;
         }
 
+        uint32_t result;
         if (size == 1) {
-            return *((uint8_t*) base);
+            result = *((uint8_t*) base);
         } else if (size == 2) {
-            return *((uint16_t*) base);
+            result = *((uint16_t*) base);
         } else {
-            return *((uint32_t*) base);
+            result = *((uint32_t*) base);
         }
+
+        /* Log reads to rd_mac_spi_sys_3 (PKG_VERSION lives here) */
+        if (addr == 0x50) {
+            uint32_t pkg_ver = (result >> 21) & 0xF;
+            warn_report("[EFUSE] Read rd_mac_spi_sys_3 @ 0x50 => 0x%08x (PKG_VERSION=%u)", result, pkg_ver);
+        }
+
+        return result;
     }
 
     /* Treat the interrupt-related cases separately, make sure we only access the registers below as 32-bit words */

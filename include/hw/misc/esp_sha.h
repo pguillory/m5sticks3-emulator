@@ -111,6 +111,9 @@ typedef struct ESPShaState {
 
     /* Public: must be set before realizing instance*/
     ESPGdmaState *gdma;
+
+    /* Debug counter */
+    uint32_t op_count;
 } ESPShaState;
 
 typedef struct ESPShaClass {

@@ -15,11 +15,12 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "hw/i2c/i2c.h"
 #include "hw/misc/m5pm1.h"
 
-#define M5PM1_DEBUG  0
+#define M5PM1_DEBUG  1
 
 
 static void m5pm1_reset_regs(M5PM1State *s)
@@ -41,6 +42,15 @@ static int m5pm1_i2c_event(I2CSlave *i2c, enum i2c_event event)
 {
     M5PM1State *s = M5PM1(i2c);
 
+    static const char *event_names[] = {
+        [I2C_START_SEND] = "START_SEND",
+        [I2C_START_SEND_ASYNC] = "START_SEND_ASYNC",
+        [I2C_START_RECV] = "START_RECV",
+        [I2C_FINISH] = "FINISH",
+        [I2C_NACK] = "NACK",
+    };
+    warn_report("[M5PM1] event: %s", event_names[event]);
+
     switch (event) {
     case I2C_START_SEND:
     case I2C_START_SEND_ASYNC:
@@ -60,9 +70,7 @@ static uint8_t m5pm1_i2c_recv(I2CSlave *i2c)
     M5PM1State *s = M5PM1(i2c);
     uint8_t val = s->regs[s->reg_addr];
 
-#if M5PM1_DEBUG
-    info_report("[M5PM1] Read reg 0x%02x => 0x%02x", s->reg_addr, val);
-#endif
+    warn_report("[M5PM1] Read reg 0x%02x => 0x%02x", s->reg_addr, val);
 
     s->reg_addr++;
     return val;
@@ -76,10 +84,9 @@ static int m5pm1_i2c_send(I2CSlave *i2c, uint8_t data)
     if (!s->addr_received) {
         s->reg_addr = data;
         s->addr_received = true;
+        warn_report("[M5PM1] Set reg addr = 0x%02x", data);
     } else {
-#if M5PM1_DEBUG
-        info_report("[M5PM1] Write reg 0x%02x <= 0x%02x", s->reg_addr, data);
-#endif
+        warn_report("[M5PM1] Write reg 0x%02x <= 0x%02x", s->reg_addr, data);
         s->regs[s->reg_addr] = data;
         s->reg_addr++;
     }

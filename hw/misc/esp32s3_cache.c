@@ -27,7 +27,7 @@
 
 
 #define CACHE_DEBUG      0
-#define CACHE_WARNING    1
+#define CACHE_WARNING    0
 
 
 /**
@@ -217,6 +217,21 @@ static void esp32s3_cache_write(void *opaque, hwaddr addr, uint64_t value,
                                 unsigned int size)
 {
     ESP32S3CacheState *s = ESP32S3_CACHE(opaque);
+    static uint32_t cache_write_count = 0;
+    static uint32_t cache_valid_writes = 0;
+    cache_write_count++;
+    /* Log non-invalidation MMU writes (valid page entries) */
+    if (addr >= 0x1000 && (uint32_t)value != 0x00004000) {
+        cache_valid_writes++;
+        if (cache_valid_writes <= 200) {
+            info_report("[CACHE] MMU valid #%u (total #%u): addr=0x%03x value=0x%08x",
+                        cache_valid_writes, cache_write_count, (uint32_t)addr, (uint32_t)value);
+        }
+    }
+    if (cache_write_count <= 5 || cache_write_count % 50000 == 0) {
+        info_report("[CACHE] write #%u: addr=0x%03x value=0x%08x",
+                    cache_write_count, (uint32_t)addr, (uint32_t)value);
+    }
 
     const hwaddr index = ESP32S3_CACHE_REG_IDX(addr);
 
@@ -408,6 +423,20 @@ static IOMMUTLBEntry esp32s3_mmu_region_translate(IOMMUMemoryRegion *iommu, hwad
         ret.perm = (s->psram == NULL) ? IOMMU_NONE : IOMMU_RW;
     } else {
         ret.perm = (s->flash_blk == NULL) ? IOMMU_NONE : IOMMU_RO;
+    }
+
+    {
+        static uint64_t translate_count = 0;
+        static uint32_t last_page = 0xFFFF;
+        translate_count++;
+        /* Log on page boundaries (when page number changes) and periodically */
+        if (entry.page_number != last_page || translate_count % 50000 == 0) {
+            info_report("[IOMMU] translate #%llu: vaddr=0x%08x -> page=%u inv=%u perm=%d",
+                        (unsigned long long)translate_count,
+                        (uint32_t)addr, entry.page_number, entry.invalid,
+                        ret.perm);
+            last_page = entry.page_number;
+        }
     }
 
     return ret;

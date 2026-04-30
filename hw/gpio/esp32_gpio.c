@@ -256,6 +256,16 @@ static uint64_t esp32_gpio_read(void *opaque, hwaddr addr, unsigned int size)
     case A_GPIO_IN1:
         r = (s->gpio_out1 & s->gpio_enable1) |
             (s->gpio_in1 & ~s->gpio_enable1);
+        /*
+         * I2C bit-bang ACK: if any pins have a pending ACK, force
+         * those bits LOW in this read, then clear the pending flag
+         * and restore gpio_in1 to HIGH for future reads.
+         */
+        if (s->i2c_ack_pending1) {
+            r &= ~s->i2c_ack_pending1;
+            s->gpio_in1 |= s->i2c_ack_pending1;  /* restore to HIGH */
+            s->i2c_ack_pending1 = 0;
+        }
         break;
     case A_GPIO_STATUS:
         r = s->gpio_status;
@@ -372,13 +382,31 @@ static void esp32_gpio_write(void *opaque, hwaddr addr,
         break;
 
     case A_GPIO_ENABLE1:
-        s->gpio_enable1 = wval;
+        {
+            /* Detect output→input transitions on I2C SDA pins */
+            uint32_t clearing = s->gpio_enable1 & ~wval;
+            if (clearing & s->i2c_sda_ack_mask1) {
+                uint32_t ack_pins = clearing & s->i2c_sda_ack_mask1;
+                s->gpio_in1 &= ~ack_pins;       /* Pull SDA LOW (ACK) */
+                s->i2c_ack_pending1 |= ack_pins; /* Mark for one-shot restore */
+            }
+            s->gpio_enable1 = wval;
+        }
         break;
     case A_GPIO_ENABLE1_W1TS:
         s->gpio_enable1 |= wval;
         break;
     case A_GPIO_ENABLE1_W1TC:
-        s->gpio_enable1 &= ~wval;
+        {
+            /* Detect output→input transitions on I2C SDA pins */
+            uint32_t clearing = wval & s->gpio_enable1;
+            if (clearing & s->i2c_sda_ack_mask1) {
+                uint32_t ack_pins = clearing & s->i2c_sda_ack_mask1;
+                s->gpio_in1 &= ~ack_pins;       /* Pull SDA LOW (ACK) */
+                s->i2c_ack_pending1 |= ack_pins; /* Mark for one-shot restore */
+            }
+            s->gpio_enable1 &= ~wval;
+        }
         break;
 
     case A_GPIO_STATUS:
@@ -485,6 +513,9 @@ static void esp32_gpio_reset_hold(Object *obj, ResetType type)
     s->gpio_in1 = 0x0001FFFF;  /* Only bits 0-16 valid (GPIO 32-48) */
     s->gpio_status = 0;
     s->gpio_status1 = 0;
+
+    s->i2c_ack_pending1 = 0;
+    /* i2c_sda_ack_mask1 is set by machine config, don't clear it here */
 
     memset(s->pin_reg, 0, sizeof(s->pin_reg));
     memset(s->func_in_sel, 0, sizeof(s->func_in_sel));

@@ -174,6 +174,7 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
   'esp32s3_ble.c',
   'axp2101.c',
   'm5pm1.c',
+  'bm8563.c',
 ))
 if host_os == 'darwin'
   corebluetooth = dependency('appleframeworks', modules: 'CoreBluetooth',

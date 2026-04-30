@@ -11,6 +11,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include <signal.h>
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/memalign.h"
@@ -77,6 +78,7 @@
 #include "hw/audio/es8311.h"
 #include "hw/misc/axp2101.h"
 #include "hw/misc/m5pm1.h"
+#include "hw/misc/bm8563.h"
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/misc/esp32s3_wifi.h"
 #include "hw/misc/esp32s3_wifi_net.h"
@@ -127,7 +129,7 @@ static const struct MemmapEntry {
 
 #define ESP32S3_IO_WARNING  0
 #define ESP32S3_IO_STALL_DETECT  0
-#define ESP32S3_HEARTBEAT  0
+#define ESP32S3_HEARTBEAT  1
 
 typedef struct Esp32s3SocState {
     /*< private >*/
@@ -203,6 +205,9 @@ typedef struct Esp32s3SocState {
     SsiPsramState *psram;
 
     uint32_t requested_reset;
+
+    /* Debug: periodic PC trace timer */
+    QEMUTimer *pc_trace_timer;
 } Esp32s3SocState;
 
 
@@ -490,6 +495,50 @@ static void esp32s3_init_openeth(Esp32s3SocState *ms)
 }
 
 
+/* Debug: global for QEMU timer access */
+static Esp32s3SocState *g_debug_soc = NULL;
+
+/* Debug timer: log current PC every second to track boot progress */
+static void esp32s3_pc_trace_timer(void *opaque)
+{
+    Esp32s3SocState *s = (Esp32s3SocState *)opaque;
+    CPUXtensaState *env = &s->cpu[0].env;
+    uint32_t pc = env->pc;
+    static uint32_t last_pc = 0;
+    static int same_count = 0;
+
+    if (pc == last_pc) {
+        same_count++;
+        if (same_count <= 3 || same_count % 10 == 0) {
+            warn_report("[PC-TRACE] PC=0x%08x (same x%d)", pc, same_count);
+        }
+
+        /* Detect ROM abort handler spin loop and break out of it.
+         * The ESP32-S3 ROM abort handler at 0x40006fcb polls a RAM flag
+         * at 0x3fcef9e4 waiting for a system restart that never comes
+         * (because the WDT reset isn't emulated). Clear the flag to let
+         * execution continue past the abort handler. */
+        if (pc == 0x40006fcb && same_count >= 3) {
+            CPUState *cs = env_cpu(env);
+            uint32_t zero = 0;
+            cpu_memory_rw_debug(cs, 0x3fcef9e4, (uint8_t *)&zero, 4, true);
+            warn_report("[PC-TRACE] Cleared abort spin-loop flag at 0x3fcef9e4");
+        }
+    } else {
+        if (same_count > 1) {
+            warn_report("[PC-TRACE] PC=0x%08x (was 0x%08x x%d)", pc, last_pc, same_count);
+        } else {
+            warn_report("[PC-TRACE] PC=0x%08x", pc);
+        }
+        same_count = 1;
+        last_pc = pc;
+    }
+
+    /* Reschedule in 1 second */
+    timer_mod(s->pc_trace_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
+}
+
 static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 {
     Esp32s3SocState *s = ESP32S3_SOC(dev);
@@ -645,6 +694,18 @@ static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
 {
     Esp32s3SocState *ss = (Esp32s3SocState *)opaque;
     uint32_t index = addr / sizeof(uint32_t);
+
+    {
+        static uint64_t io_read_count = 0;
+        io_read_count++;
+        if (io_read_count <= 3 || io_read_count % 100000 == 0) {
+            CPUXtensaState *env = &ss->cpu[0].env;
+            info_report("[IO-READ] #%llu addr=$%08lx PC=0x%08x",
+                        (unsigned long long)io_read_count,
+                        (unsigned long)(ESP32S3_IO_START_ADDR + addr),
+                        env->pc);
+        }
+    }
 
 #if ESP32S3_HEARTBEAT
     esp32s3_heartbeat_check(ss);
@@ -1210,6 +1271,19 @@ static void esp32s3_machine_init(MachineState *machine)
         /* Connect GPIO interrupt to the interrupt matrix */
         sysbus_connect_irq(SYS_BUS_DEVICE(&ss->gpio), 0,
                            qdev_get_gpio_in(intmatrix_dev, ETS_GPIO_INTR_SOURCE));
+
+        /*
+         * M5StickS3 I2C bit-bang ACK: GPIO48 is the SDA pin for the I2C1 bus
+         * used in M5Unified's board detection (bit-bang I2C).  GPIO48 is bit 16
+         * in the GPIO 32-48 bank.  When firmware releases SDA (clears output
+         * enable) after sending an address, the GPIO model will pull SDA LOW
+         * for one read cycle to simulate a slave ACK.
+         */
+        /* I2C bit-bang ACK: disabled for now. ACK-ing all addresses causes
+         * M5Unified to misdetect the board. Selective I2C ACK (only for
+         * specific device addresses) is needed for proper board detection. */
+        /* Esp32GpioState *gpio = ESP32_GPIO(&ss->gpio);
+        gpio->i2c_sda_ack_mask1 = (1u << 16); */
     }
 
     {
@@ -1245,9 +1319,9 @@ static void esp32s3_machine_init(MachineState *machine)
         DeviceState *st7789 = qdev_new(TYPE_ST7789V2);
         qdev_realize(st7789, spi3_bus, &error_fatal);
 
-        /* Connect GPSPI3 CS0 to ST7789V2 CS */
-        qdev_connect_gpio_out_named(spi3_master, SSI_GPIO_CS, 0,
-                                    qdev_get_gpio_in_named(st7789, SSI_GPIO_CS, 0));
+        /* CS connection removed: the ST7789V2 uses SSI_CS_NONE because
+         * the firmware manages CS manually via GPIO 41, not through the
+         * SPI controller's built-in CS pins. */
 
         /*
          * Connect GPIO pin 45 (DC) to the ST7789V2's DC input.
@@ -1282,6 +1356,7 @@ static void esp32s3_machine_init(MachineState *machine)
 
     /* I2C0 controller */
     {
+        ss->i2c[0].port_num = 0;
         sysbus_realize(SYS_BUS_DEVICE(&ss->i2c[0]), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2c[0]), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C_EXT_BASE, mr, 0);
@@ -1292,6 +1367,7 @@ static void esp32s3_machine_init(MachineState *machine)
     /* I2C1 controller — M5StickS3 firmware uses I2C1 for its internal bus
      * (PMIC, codec, IMU). Attach slave devices here. */
     {
+        ss->i2c[1].port_num = 1;
         sysbus_realize(SYS_BUS_DEVICE(&ss->i2c[1]), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2c[1]), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C1_EXT_BASE, mr, 0);
@@ -1303,6 +1379,7 @@ static void esp32s3_machine_init(MachineState *machine)
         I2CBus *i2c_bus = I2C_BUS(qdev_get_child_bus(DEVICE(&ss->i2c[1]), "i2c"));
         i2c_slave_create_simple(i2c_bus, TYPE_ES8311, ES8311_I2C_ADDR);
         i2c_slave_create_simple(i2c_bus, TYPE_M5PM1, M5PM1_I2C_ADDR);
+        i2c_slave_create_simple(i2c_bus, TYPE_BM8563, BM8563_I2C_ADDR);
     }
 
     /* GDMA Realization */
@@ -1524,6 +1601,14 @@ static void esp32s3_machine_init(MachineState *machine)
     }
 
     /* Heartbeat check is done inline in IO read handlers now */
+
+    /* Start debug PC trace timer (logs PC every second using real-time clock) */
+    ss->pc_trace_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                       esp32s3_pc_trace_timer, ss);
+    timer_mod(ss->pc_trace_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 2000);
+
+    g_debug_soc = ss;
 }
 
 

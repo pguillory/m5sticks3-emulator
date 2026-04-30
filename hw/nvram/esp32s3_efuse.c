@@ -24,13 +24,21 @@ static void esp32s3_efuse_realize(DeviceState *dev, Error **errp)
      * path to follow; pkg_ver 0 (QFN56) leads to wrong detection. */
     esp32s3_class->parent_realize(dev, errp);
 
-    /* Set PKG_VERSION after parent realize to avoid being overwritten */
-    s->efuses.blocks.rd_mac_spi_sys_3 =
-        FIELD_DP32(s->efuses.blocks.rd_mac_spi_sys_3,
-                   EFUSE_RD_MAC_SPI_SYS_3, PKG_VERSION, 1);
-    /* Also set in internal copy used by crypto modules */
-    s->efuses_internal.blocks.rd_mac_spi_sys_3 =
-        s->efuses.blocks.rd_mac_spi_sys_3;
+    /* Set PKG_VERSION after parent realize to avoid being overwritten.
+     * Must also set in the mirror — esp_efuse_reset_hold() reloads from
+     * the mirror, which would overwrite our blocks value with zeros. */
+    uint32_t val = FIELD_DP32(s->efuses.blocks.rd_mac_spi_sys_3,
+                              EFUSE_RD_MAC_SPI_SYS_3, PKG_VERSION, 1);
+    s->efuses.blocks.rd_mac_spi_sys_3 = val;
+    s->efuses_internal.blocks.rd_mac_spi_sys_3 = val;
+
+    /* Set in the mirror/block-device so resets preserve the value */
+    if (s->mirror) {
+        ESPEfuseBlocks *mirror_blocks = (ESPEfuseBlocks *)s->mirror;
+        mirror_blocks->rd_mac_spi_sys_3 =
+            FIELD_DP32(mirror_blocks->rd_mac_spi_sys_3,
+                       EFUSE_RD_MAC_SPI_SYS_3, PKG_VERSION, 1);
+    }
 
     warn_report("[EFUSE] Set PKG_VERSION=1 in rd_mac_spi_sys_3=0x%08x",
                 s->efuses.blocks.rd_mac_spi_sys_3);

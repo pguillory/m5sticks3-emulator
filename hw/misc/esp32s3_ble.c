@@ -27,7 +27,7 @@
 #include "hw/xtensa/esp32s3_elf_hooks.h"
 #include "exec/cpu-common.h"
 
-#define BLE_DEBUG 1
+#define BLE_DEBUG 0
 
 #if BLE_DEBUG
 #define BLE_DPRINTF(fmt, ...) \
@@ -613,10 +613,16 @@ static uint64_t esp32s3_ble_read(void *opaque, hwaddr addr, unsigned int size)
     case BLE_REG_VTASKDELAY_ADDR:
         return (uint32_t)s->vtaskdelay_addr;
 
-    default:
-        BLE_DPRINTF("MMIO read: offset=0x%03lx (unknown)\n",
-                     (unsigned long)addr);
+    default: {
+        /* Read-as-written register file for BLE controller hardware registers.
+         * The BLE controller init does read-modify-write on config registers;
+         * returning 0 causes the LLD to assert. */
+        uint32_t idx = addr / sizeof(uint32_t);
+        if (idx < ARRAY_SIZE(s->hw_regs)) {
+            return s->hw_regs[idx];
+        }
         return 0;
+    }
     }
 }
 
@@ -637,10 +643,14 @@ static void esp32s3_ble_write(void *opaque, hwaddr addr, uint64_t value,
         qemu_mutex_unlock(&s->event_lock);
         break;
 
-    default:
-        BLE_DPRINTF("MMIO write: offset=0x%03lx value=0x%08lx (ignored)\n",
-                     (unsigned long)addr, (unsigned long)value);
+    default: {
+        /* Store to read-as-written register file */
+        uint32_t idx = addr / sizeof(uint32_t);
+        if (idx < ARRAY_SIZE(s->hw_regs)) {
+            s->hw_regs[idx] = (uint32_t)value;
+        }
         break;
+    }
     }
 }
 
@@ -792,6 +802,7 @@ static void esp32s3_ble_init(Object *obj)
     s->mtu = 512;  /* Default preferred MTU */
     s->status = BLE_STATUS_IDLE;
     s->next_attr_handle = 1;
+    memset(s->hw_regs, 0, sizeof(s->hw_regs));
 
     BLE_DPRINTF("BLE device initialized, MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
                 s->mac[0], s->mac[1], s->mac[2],

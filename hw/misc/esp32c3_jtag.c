@@ -23,12 +23,13 @@ static uint64_t esp32c3_jtag_read(void *opaque, hwaddr addr, unsigned int size)
 
     switch (addr) {
     case 0x04:
-        /* USB_SERIAL_JTAG_EP1_CONF_REG:
-         * Bit 2 (SERIAL_IN_EP_DATA_FREE): Return 1 to indicate the
-         * serial-in endpoint is free (ready to accept data).
-         * Bit 1 (SERIAL_OUT_EP_DATA_AVAIL): Return 0 — no JTAG download
-         * data pending (setting this would enter download mode). */
-        return (1 << 2);
+        /* USB_SERIAL_JTAG_EP1_CONF_REG (ESP32-S3 TRM §30.4):
+         * Bit 0 (WR_DONE): W1S — firmware sets when done writing
+         * Bit 1 (SERIAL_IN_EP_DATA_FREE): RO — 1 = TX FIFO not full,
+         *        ready to accept data.  ROM polls this before each write.
+         * Bit 2 (SERIAL_OUT_EP_DATA_AVAIL): RO — 1 = RX data available.
+         *        Must be 0 or ROM enters download mode. */
+        return (1 << 1);
     default:
         return 0;
     }

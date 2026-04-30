@@ -91,6 +91,15 @@ static uint64_t uart_read(void *opaque, hwaddr addr, unsigned int size)
         break;
 
     case A_UART_STATUS:
+        /* If the TX FIFO still has data, try to drain it now.
+         * In QEMU TCG mode the CPU can monopolize execution, preventing
+         * the GLib watch from firing to retry failed chardev writes.
+         * Retrying here breaks the deadlock: the CPU polls STATUS in a
+         * tight loop, and each poll attempt gives uart_transmit another
+         * chance to push bytes to the backend. */
+        if (fifo8_num_used(&s->tx_fifo) > 0) {
+            uart_transmit(NULL, G_IO_OUT, s);
+        }
         r = FIELD_DP32(r, UART_STATUS, RXFIFO_CNT, fifo8_num_used(&s->rx_fifo));
         r = FIELD_DP32(r, UART_STATUS, TXFIFO_CNT, fifo8_num_used(&s->tx_fifo));
         break;

@@ -2,13 +2,28 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/irq.h"
 
 #define ESP32_I2C_DEBUG  0
 
+/*
+ * Delay (in virtual nanoseconds) before asserting the I2C interrupt after
+ * a transaction completes.  See the irq_timer comment in esp32_i2c.h.
+ * 10µs is enough for the firmware's polling loop to read INT_RAW and
+ * process the result before any ISR fires.
+ */
+#define I2C_IRQ_DELAY_NS  10000
+
 static void esp32_i2c_do_transaction(Esp32I2CState * s);
 static void esp32_i2c_update_irq(Esp32I2CState * s);
+
+static void esp32_i2c_irq_timer_cb(void *opaque)
+{
+    Esp32I2CState *s = (Esp32I2CState *)opaque;
+    esp32_i2c_update_irq(s);
+}
 
 static void esp32_i2c_reset_hold(Object *obj, ResetType type)
 {
@@ -179,7 +194,7 @@ static void esp32_i2c_do_transaction(Esp32I2CState * s)
     bool stop_or_end = false;
     for (int i_cmd = 0; i_cmd < ESP32_I2C_CMD_COUNT && !stop_or_end; ++i_cmd) {
         uint32_t cmd = s->cmd_reg[i_cmd];
-        char opcode = FIELD_EX32(cmd, I2C_CMD, OPCODE);
+        uint32_t opcode = FIELD_EX32(cmd, I2C_CMD, OPCODE);
         switch (opcode) {
             case I2C_OPCODE_RSTART:
             case I2C_OPCODE_RSTART_S3:
@@ -195,7 +210,8 @@ static void esp32_i2c_do_transaction(Esp32I2CState * s)
                     uint8_t is_read = data & 0x1;
                     int nack = i2c_start_transfer(s->bus, addr, is_read);
 #if ESP32_I2C_DEBUG
-                    warn_report("esp32_i2c: I2C %s addr=0x%02x %s",
+                    warn_report("esp32_i2c[%d]: I2C %s addr=0x%02x %s",
+                                s->port_num,
                                 is_read ? "READ" : "WRITE", addr,
                                 nack ? "NACK" : "ACK");
 #endif
@@ -246,7 +262,17 @@ static void esp32_i2c_do_transaction(Esp32I2CState * s)
         }
         s->cmd_reg[i_cmd] = FIELD_DP32(s->cmd_reg[i_cmd], I2C_CMD, DONE, 1);
     }
-    esp32_i2c_update_irq(s);
+    /*
+     * Defer the IRQ assertion so the firmware's polling loop can see
+     * the INT_RAW bits (END_DETECT, TRANS_COMPLETE) before any ISR runs
+     * and clears them.  See the comment on irq_timer in esp32_i2c.h.
+     */
+    if (s->irq_timer) {
+        timer_mod(s->irq_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + I2C_IRQ_DELAY_NS);
+    } else {
+        esp32_i2c_update_irq(s);
+    }
 }
 
 static const MemoryRegionOps esp32_i2c_ops = {
@@ -268,6 +294,9 @@ static void esp32_i2c_init(Object * obj)
 
     fifo8_create(&s->tx_fifo, ESP32_I2C_FIFO_LENGTH);
     fifo8_create(&s->rx_fifo, ESP32_I2C_FIFO_LENGTH);
+
+    s->irq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                esp32_i2c_irq_timer_cb, s);
 }
 
 static void esp32_i2c_class_init(ObjectClass * klass, void * data)

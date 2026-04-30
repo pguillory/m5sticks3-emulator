@@ -100,6 +100,26 @@ typedef struct Esp32GpioState {
     uint32_t func_in_sel[256];
     uint32_t func_out_sel[ESP32_GPIO_MAX_COUNT];
 
+    /*
+     * I2C bit-bang ACK simulation.
+     *
+     * On the M5StickS3, the I2C bus has external pull-up resistors and
+     * slave devices (M5PM1 PMIC at 0x6E).  M5Unified's board detection
+     * bit-bangs I2C by toggling GPIO outputs and reading the SDA pin.
+     * The I2C slave models in the emulator are connected to the I2C
+     * controller MMIO, not to raw GPIO, so the bit-bang never reaches them.
+     *
+     * To bridge this gap: when a pin marked in i2c_sda_ack_mask transitions
+     * from output-enabled to input (output enable cleared), we temporarily
+     * pull its gpio_in value LOW for one GPIO_IN read.  This simulates the
+     * ACK pulse that a real I2C slave would generate.
+     *
+     * i2c_sda_ack_mask1: bitmask for GPIO 32-48 pins that have I2C slaves
+     * i2c_ack_pending1:  bits pending a one-shot LOW read
+     */
+    uint32_t i2c_sda_ack_mask1;
+    uint32_t i2c_ack_pending1;
+
 } Esp32GpioState;
 
 typedef struct Esp32GpioClass {
