@@ -76,6 +76,7 @@
 #include "hw/audio/esp32s3_i2s.h"
 #include "hw/audio/es8311.h"
 #include "hw/misc/axp2101.h"
+#include "hw/misc/m5pm1.h"
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/misc/esp32s3_wifi.h"
 #include "hw/misc/esp32s3_wifi_net.h"
@@ -683,34 +684,89 @@ static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
 
     /* The 0x6000E000 range contains the I2C_ANA_MST (analog master) and
      * related calibration registers used by ROM functions rom_i2c_readReg/
-     * rom_i2c_writeReg to access internal analog peripherals like the BBPLL. */
+     * rom_i2c_writeReg to access internal analog peripherals like the BBPLL.
+     *
+     * The command register at offset 0x000 is handled specially by the write
+     * path (shadow register read/write). Status/config registers at other
+     * offsets use write-then-readback from io_regs, but always report "done"
+     * (bit 24) and "not busy" (clear bit 25) so polling loops complete. */
     if (addr >= 0xE000 && addr < 0xF000) {
         uint32_t off = addr & 0xFFF;
-        uint64_t ret;
+
+        /* I2C_ANA_MST registers. Command registers at 0x000-0x03C need
+         * busy bit cleared. Everything else returns write-readback from
+         * io_regs. 0x040 always has BBPLL_CAL_DONE (bit 24) set.
+         *
+         * For 0x050 and other status registers: return io_regs value but
+         * clear bits 6 and 7 to simulate calibration/operation complete
+         * (these appear to be busy/active indicators in the analog block). */
         if (off == 0x040) {
-            ret = 0x01000000;  /* bit 24 set = BBPLL_CAL_DONE */
-        } else if (off == 0x04C) {
-            ret = ss->io_regs[index];
-        } else {
-            ret = ss->io_regs[index];
+            return 0x01000000;  /* bit 24 = BBPLL_CAL_DONE */
         }
-        return ret;
+
+        if (off <= 0x03C) {
+            /* Command registers: clear busy bit 25 */
+            if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
+                return ss->io_regs[index] & ~(1u << 25);
+            }
+            return 0;
+        }
+
+        /* Status/config registers (0x044-0x0FF):
+         * The firmware writes to these and polls for hardware-set
+         * completion bits. Return all-ones to satisfy any "wait for
+         * bit set" loop. */
+        if (off < 0x100) {
+            return 0xFFFFFFFF;
+        }
+
+        /* Registers at 0x100+ are additional I2C master control/status.
+         * Some firmware loops wait for bits to CLEAR (e.g. busy→idle).
+         * Return 0 to satisfy "wait for bit clear" polling. */
+        return 0;
     }
 
-    /* SENS (Sensor) block at 0x60008800: SAR ADC control registers.
-     * SAR_MEAS1_CTRL2_REG (offset 0x0c) and SAR_MEAS2_CTRL2_REG (offset 0x30)
-     * each have a "measurement done" status bit at bit 16. The firmware polls
-     * these during ADC/temperature sensor reads. Since we don't model the ADC,
-     * always report measurements as instantly complete. */
+    /* SENS (Sensor) block at 0x60008800: SAR ADC and temperature sensor.
+     * Multiple registers have hardware status bits the firmware polls:
+     *   SAR_MEAS1_CTRL2 (0x0c): bit 16 = meas1_done
+     *   SAR_MEAS2_CTRL2 (0x30): bit 16 = meas2_done
+     *   SAR_TSENS_CTRL  (0x50): bit 22 = tsens_ready, bits 7:0 = tsens_out
+     *   SAR_TSENS_CTRL2 (0x54): bit 15 = tsens_clk_sel
+     * Since we don't model the ADC/temperature sensor, report done/ready. */
     if (addr >= 0x8800 && addr < 0x8900) {
         uint32_t sens_off = addr - 0x8800;
+        uint32_t val = 0;
+        if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
+            val = ss->io_regs[index];
+        }
         if (sens_off == 0x0c || sens_off == 0x30) {
-            uint32_t val = 0;
-            if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
-                val = ss->io_regs[index];
-            }
             return val | (1u << 16);  /* measurement done */
         }
+        if (sens_off == 0x50) {
+            /* SAR_TSENS_CTRL: set TSENS_READY (bit 8), provide a
+             * dummy temperature value (~25°C = 128) in bits 7:0. */
+            return (val & 0xFFFFFE00) | (1u << 8) | 128;
+        }
+    }
+
+    /* Radio front-end blocks (FE at 0x60006000, FE2 at 0x60005000):
+     * WiFi/BLE radio calibration uses these registers. The calibration
+     * firmware polls registers waiting for hardware state changes that
+     * we can't perfectly emulate. We use a toggling strategy: alternate
+     * between returning 0 and 0xFFFFFFFF every few reads so that any
+     * polling condition (checking for bits set OR cleared) will
+     * eventually be satisfied within a few iterations. */
+    if (addr >= 0x5000 && addr < 0x7000) {
+        static hwaddr fe_last_addr = 0;
+        static int fe_read_count = 0;
+        if (addr == fe_last_addr) {
+            fe_read_count++;
+        } else {
+            fe_last_addr = addr;
+            fe_read_count = 0;
+        }
+        /* Toggle every 2 reads: 0xFFFFFFFF, 0xFFFFFFFF, 0, 0, ... */
+        return (fe_read_count / 2) % 2 ? 0 : 0xFFFFFFFF;
     }
 
 #if ESP32S3_IO_WARNING
@@ -727,19 +783,14 @@ static uint64_t esp32s3_io_read(void *opaque, hwaddr addr, unsigned int size)
 #endif
     if (ss && ss->io_regs && index < ESP32S3_IO_REG_COUNT) {
         uint32_t val = ss->io_regs[index];
-        /* SPI0: After reading FSM register, auto-clear the FSM state bits
-         * to simulate the SPI controller completing its operation. */
-        if (addr == 0x3054) {
-            ss->io_regs[index] = val & ~0x7;  /* Clear SPI_MEM_ST bits */
+
+        /* Reserved region 0x6002F000-0x60037FFF: firmware may write command
+         * bits and poll for hardware to clear them. Auto-clear bit 31 on
+         * read to simulate command completion (prevents infinite polling). */
+        if (addr >= 0x2F000 && addr < 0x38000) {
+            ss->io_regs[index] = val & ~(1u << 31);
         }
-        /* SPI0: Auto-clear SPI_MEM_CMD command bits on read.
-         * On real hardware, the SPI controller clears command bits when the
-         * operation completes. The firmware polls this register waiting for
-         * the command bit to go low. Also clear SPI_MEM_CMD at offset 0x008
-         * (which is sometimes the actual CMD register offset). */
-        if (addr == 0x3000 || addr == 0x3008) {
-            ss->io_regs[index] = 0;  /* All command bits cleared = idle */
-        }
+
         return val;
     }
     return 0;
@@ -809,16 +860,7 @@ static void esp32s3_io_write(void *opaque, hwaddr addr, uint64_t value, unsigned
 
         }
 
-        /* SPI0 (MSPI): When a command is written to SPI_MEM_CMD (offset 0x00),
-         * configuration registers are changed, or timing calibration registers
-         * at 0x6000E000 are written, simulate a brief FSM busy period by
-         * setting SPI_MEM_ST bits [2:0] in the FSM register.
-         * This satisfies the bootloader's timing tuning polling loop. */
-        if ((addr >= 0x3000 && addr < 0x3100 && addr != 0x3054) ||
-            (addr >= 0xE000 && addr < 0xF000)) {
-            /* Set FSM state to 1 ("preparation") to indicate busy */
-            ss->io_regs[SPI0_FSM_INDEX] = (ss->io_regs[SPI0_FSM_INDEX] & ~0x7) | 1;
-        }
+        /* SPI0 FSM busy logic removed — caused regression in bootloader */
     }
 }
 
@@ -1238,27 +1280,29 @@ static void esp32s3_machine_init(MachineState *machine)
                            qdev_get_gpio_in(intmatrix_dev, ETS_I2S1_INTR_SOURCE));
     }
 
-    /* I2C0 controller (used for ES8311 codec on M5StickS3) */
+    /* I2C0 controller */
     {
         sysbus_realize(SYS_BUS_DEVICE(&ss->i2c[0]), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2c[0]), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C_EXT_BASE, mr, 0);
         sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2c[0]), 0,
                            qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE));
-
-        /* Attach I2C slave devices to I2C0 bus */
-        I2CBus *i2c_bus = I2C_BUS(qdev_get_child_bus(DEVICE(&ss->i2c[0]), "i2c"));
-        i2c_slave_create_simple(i2c_bus, TYPE_ES8311, ES8311_I2C_ADDR);
-        i2c_slave_create_simple(i2c_bus, TYPE_AXP2101, AXP2101_I2C_ADDR);
     }
 
-    /* I2C1 controller */
+    /* I2C1 controller — M5StickS3 firmware uses I2C1 for its internal bus
+     * (PMIC, codec, IMU). Attach slave devices here. */
     {
         sysbus_realize(SYS_BUS_DEVICE(&ss->i2c[1]), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->i2c[1]), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C1_EXT_BASE, mr, 0);
         sysbus_connect_irq(SYS_BUS_DEVICE(&ss->i2c[1]), 0,
                            qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT1_INTR_SOURCE));
+
+        /* Attach I2C slave devices to I2C1 bus.
+         * M5StickS3 uses M5PM1 PMIC at 0x6E (not AXP2101). */
+        I2CBus *i2c_bus = I2C_BUS(qdev_get_child_bus(DEVICE(&ss->i2c[1]), "i2c"));
+        i2c_slave_create_simple(i2c_bus, TYPE_ES8311, ES8311_I2C_ADDR);
+        i2c_slave_create_simple(i2c_bus, TYPE_M5PM1, M5PM1_I2C_ADDR);
     }
 
     /* GDMA Realization */

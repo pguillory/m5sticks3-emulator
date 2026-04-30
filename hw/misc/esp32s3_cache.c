@@ -27,7 +27,7 @@
 
 
 #define CACHE_DEBUG      0
-#define CACHE_WARNING    0
+#define CACHE_WARNING    1
 
 
 /**
@@ -197,8 +197,11 @@ static uint64_t esp32s3_cache_read(void *opaque, hwaddr addr, unsigned int size)
             r = esp32s3_read_mmu_value(s, addr - ESP32S3_MMU_TABLE_OFFSET);
             break;
         default:
+            if (index < ESP32S3_CACHE_REG_COUNT) {
+                r = s->regs[index];
+            }
 #if CACHE_WARNING
-            warn_report("[CACHE] Unsupported read to 0x%lx", addr);
+            warn_report("[CACHE] Unsupported read to 0x%lx (0x%lx)", addr, r);
 #endif
             break;
     }

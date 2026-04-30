@@ -16,6 +16,12 @@
 #define ESP32S3_EFUSE_GET_CLASS(obj) OBJECT_GET_CLASS(ESP32S3EfuseClass, obj, TYPE_ESP32S3_EFUSE)
 #define ESP32S3_EFUSE_CLASS(klass) OBJECT_CLASS_CHECK(ESP32S3EfuseClass, klass, TYPE_ESP32S3_EFUSE)
 
+/* ESP32-S3 specific eFuse field in BLOCK1 word 3 (rd_mac_spi_sys_3).
+ * Note: EFUSE_RD_MAC_SPI_SYS_3 register offset (0x50) is already defined
+ * in the C3 eFuse header which shares the same layout. We only need the
+ * S3-specific field definition here. */
+FIELD(EFUSE_RD_MAC_SPI_SYS_3, PKG_VERSION, 21, 4)
+
 
 typedef struct ESP32S3EfuseState {
     ESPEfuseState parent;

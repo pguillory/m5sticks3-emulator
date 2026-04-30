@@ -5,6 +5,8 @@
 #include "hw/i2c/esp32_i2c.h"
 #include "hw/irq.h"
 
+#define ESP32_I2C_DEBUG  0
+
 static void esp32_i2c_do_transaction(Esp32I2CState * s);
 static void esp32_i2c_update_irq(Esp32I2CState * s);
 
@@ -180,6 +182,7 @@ static void esp32_i2c_do_transaction(Esp32I2CState * s)
         char opcode = FIELD_EX32(cmd, I2C_CMD, OPCODE);
         switch (opcode) {
             case I2C_OPCODE_RSTART:
+            case I2C_OPCODE_RSTART_S3:
                 i2c_end_transfer(s->bus);
                 s->trans_ongoing = false;
                 break;
@@ -190,7 +193,13 @@ static void esp32_i2c_do_transaction(Esp32I2CState * s)
                     uint8_t data = fifo8_pop(&s->tx_fifo);
                     uint8_t addr = data >> 1;
                     uint8_t is_read = data & 0x1;
-                    if (i2c_start_transfer(s->bus, addr, is_read) != 0) {
+                    int nack = i2c_start_transfer(s->bus, addr, is_read);
+#if ESP32_I2C_DEBUG
+                    warn_report("esp32_i2c: I2C %s addr=0x%02x %s",
+                                is_read ? "READ" : "WRITE", addr,
+                                nack ? "NACK" : "ACK");
+#endif
+                    if (nack != 0) {
                         /* NACK */
                         if (FIELD_EX32(cmd, I2C_CMD, ACK_CHECK_EN)
                             && FIELD_EX32(cmd, I2C_CMD, ACK_EXP) == 0) {

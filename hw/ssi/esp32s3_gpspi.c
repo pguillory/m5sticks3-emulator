@@ -25,7 +25,7 @@
 #include "qemu/error-report.h"
 
 #define GPSPI_DEBUG   0
-#define GPSPI_WARNING 0
+#define GPSPI_WARNING 1
 
 
 static void esp32s3_gpspi_update_irq(ESP32S3GpspiState *s)
@@ -279,6 +279,11 @@ static uint64_t esp32s3_gpspi_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case A_GPSPI_DMA_INT_ENA:
         r = s->dma_int_ena;
+        break;
+    case A_GPSPI_DMA_INT_CLR:
+        /* Write-only register per TRM, but firmware reads it.
+         * Return 0 (no pending clears). */
+        r = 0;
         break;
     case A_GPSPI_DMA_INT_RAW:
         r = s->dma_int_raw;
