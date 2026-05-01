@@ -87,6 +87,8 @@ done
 
 if $BOOTED; then
     pass "Boot detected in ${i}s"
+    # Wait for display to fully render after boot
+    sleep 3
 else
     fail "Boot not detected within ${BOOT_TIMEOUT}s"
     echo "  Serial log tail:"
@@ -132,7 +134,7 @@ else
     fail "btnA press failed"
 fi
 
-sleep 1  # Allow display to update
+sleep 2  # Allow display to update
 
 SHOT2="$SCREENSHOT_DIR/screen2.ppm"
 if "$EMU" screenshot "$SHOT2" >/dev/null 2>&1 && [ -f "$SHOT2" ] && [ -s "$SHOT2" ]; then
