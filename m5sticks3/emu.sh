@@ -8,6 +8,8 @@
 #   emu.sh press <btnA|btnB>      Inject a GPIO button press (requires custom QMP cmd)
 #   emu.sh serial                 Print serial output log
 #   emu.sh stop                   Kill QEMU and clean up
+#   emu.sh status                 Show whether the emulator is running
+#   emu.sh cleanup                Find and kill orphaned QEMU processes
 #
 set -euo pipefail
 
@@ -35,11 +37,69 @@ cleanup_stale() {
         if ! kill -0 "$pid" 2>/dev/null; then
             echo "Cleaning up stale PID file (process $pid is dead)"
             rm -f "$PID_FILE" "$SOCK"
+        else
+            echo "Found live emulator (PID $pid) — stopping it first"
+            kill_and_wait "$pid"
+            rm -f "$PID_FILE" "$SOCK" "$SERIAL_LOG"
         fi
     elif [ -e "$SOCK" ] && ! [ -f "$PID_FILE" ]; then
         echo "Cleaning up orphaned socket"
         rm -f "$SOCK"
     fi
+    # Also kill any orphaned QEMU processes from this repo that lost their PID file
+    kill_orphans
+}
+
+# Send SIGTERM, wait for process to exit, escalate to SIGKILL if needed.
+# Returns 0 if the process is dead (or was already dead), 1 on failure.
+kill_and_wait() {
+    local pid="$1"
+    local timeout="${2:-5}"
+    # Already dead?
+    kill -0 "$pid" 2>/dev/null || return 0
+    # SIGTERM
+    kill "$pid" 2>/dev/null || true
+    local i=0
+    while [ "$i" -lt "$timeout" ]; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    # Still alive — escalate
+    echo "Process $pid did not exit after ${timeout}s, sending SIGKILL"
+    kill -9 "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Warning: process $pid still alive after SIGKILL" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Find and kill orphaned qemu-system-xtensa processes that were launched from
+# this repo's build directory. These are processes that lost their PID file
+# (e.g., a session exited without calling 'emu.sh stop').
+kill_orphans() {
+    local count=0
+    local tracked=""
+    [ -f "$PID_FILE" ] && tracked=$(cat "$PID_FILE")
+    # Look for qemu-system-xtensa processes whose binary path is our build's QEMU.
+    # pgrep -f matches command line; we anchor on the full QEMU path to avoid
+    # matching this script or unrelated processes.
+    local pids; pids=$(pgrep -f "${QEMU}.*-M esp32s3" 2>/dev/null || true)
+    [ -z "$pids" ] && return 0
+    while IFS= read -r pid; do
+        [ -z "$pid" ] && continue
+        # Skip if this is the PID-file-tracked instance (already handled by caller)
+        [ -n "$tracked" ] && [ "$pid" = "$tracked" ] && continue
+        # Skip our own PID (emu.sh itself can match pgrep -f)
+        [ "$pid" = "$$" ] && continue
+        echo "Killing orphaned QEMU process: PID $pid"
+        kill_and_wait "$pid"
+        count=$((count + 1))
+    done <<< "$pids"
+    [ "$count" -gt 0 ] && echo "Cleaned up $count orphaned QEMU process(es)"
+    return 0
 }
 
 # Send a QMP command. Performs the capabilities handshake each time.
@@ -176,11 +236,65 @@ cmd_serial() {
 }
 
 cmd_stop() {
-    require_running
-    local pid; pid=$(cat "$PID_FILE")
-    kill "$pid" 2>/dev/null || true
-    rm -f "$PID_FILE" "$SOCK" "$SERIAL_LOG"
-    echo "Emulator stopped (was PID $pid)"
+    if [ -f "$PID_FILE" ]; then
+        local pid; pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill_and_wait "$pid"
+            echo "Emulator stopped (was PID $pid)"
+        else
+            echo "PID $pid was already dead, cleaning up"
+        fi
+        rm -f "$PID_FILE"
+    else
+        echo "No PID file found"
+    fi
+    # Also clean up any orphans
+    kill_orphans
+    rm -f "$SOCK" "$SERIAL_LOG"
+}
+
+cmd_status() {
+    if [ -f "$PID_FILE" ]; then
+        local pid; pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Emulator is running (PID $pid)"
+        else
+            echo "Emulator is NOT running (stale PID file for $pid)"
+        fi
+    else
+        echo "Emulator is NOT running (no PID file)"
+    fi
+    # Report orphans
+    local orphans; orphans=$(pgrep -f "${QEMU}.*-M esp32s3" 2>/dev/null || true)
+    if [ -n "$orphans" ]; then
+        # Filter out the tracked PID
+        local tracked=""
+        [ -f "$PID_FILE" ] && tracked=$(cat "$PID_FILE")
+        local orphan_count=0
+        while IFS= read -r pid; do
+            [ -z "$pid" ] && continue
+            [ "$pid" = "$tracked" ] && continue
+            orphan_count=$((orphan_count + 1))
+            echo "  Orphaned QEMU process: PID $pid"
+        done <<< "$orphans"
+        [ "$orphan_count" -gt 0 ] && echo "Found $orphan_count orphaned QEMU process(es) — run 'emu.sh cleanup' to kill them"
+    fi
+}
+
+cmd_cleanup() {
+    echo "Scanning for orphaned QEMU processes..."
+    # Stop tracked instance if any
+    if [ -f "$PID_FILE" ]; then
+        local pid; pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Stopping tracked emulator (PID $pid)"
+            kill_and_wait "$pid"
+        fi
+        rm -f "$PID_FILE"
+    fi
+    kill_orphans
+    rm -f "$SOCK" "$SERIAL_LOG"
+    echo "Cleanup complete"
 }
 
 # --- dispatch ---
@@ -191,8 +305,10 @@ case "${1:-}" in
     press)       shift; cmd_press "$@" ;;
     serial)      cmd_serial ;;
     stop)        cmd_stop ;;
+    status)      cmd_status ;;
+    cleanup)     cmd_cleanup ;;
     *)
-        echo "Usage: emu.sh <start|screenshot|press|serial|stop> [args...]"
+        echo "Usage: emu.sh <start|screenshot|press|serial|stop|status|cleanup> [args...]"
         exit 1
         ;;
 esac
