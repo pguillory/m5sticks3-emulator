@@ -64,3 +64,37 @@ This is a C project (QEMU is C). The workflow is:
 1. Build the modified QEMU fork
 2. Build any M5StickS3 firmware project the normal way (e.g. `pio run`)
 3. Run the firmware binary in the emulator
+
+## Testing Firmware with the Emulator
+
+The headless emulator CLI is at `m5sticks3/emu.sh`.
+
+### Commands
+
+```bash
+./m5sticks3/emu.sh start <firmware.bin>   # start emulator with firmware
+./m5sticks3/emu.sh screenshot [out.ppm]   # capture display (Read tool can view PPM images)
+./m5sticks3/emu.sh press btnA|btnB        # press button (GPIO 11 = BtnA front, GPIO 12 = BtnB side)
+./m5sticks3/emu.sh serial                 # read serial/debug output
+./m5sticks3/emu.sh status                 # check if emulator is running
+./m5sticks3/emu.sh stop                   # stop and clean up
+./m5sticks3/emu.sh cleanup               # kill any orphaned QEMU processes
+```
+
+### Workflow
+
+1. Build firmware (`pio run` or equivalent)
+2. `emu.sh start <path-to-firmware.bin>`
+3. Wait ~2 seconds for boot
+4. `emu.sh screenshot` → use Read tool to view the PPM image
+5. `emu.sh press btnA` / `emu.sh press btnB` to interact
+6. `emu.sh serial` for debug logs
+7. `emu.sh stop` when done
+
+### Important
+
+- **Always stop the emulator** — call `emu.sh stop` or `emu.sh cleanup` before ending your session. Don't leave QEMU processes running.
+- Boot takes ~1-2 seconds; take screenshots after a short wait.
+- Buttons are active-low. BtnA = GPIO 11 (front), BtnB = GPIO 12 (side).
+- State files (`.qemu.sock`, `.qemu.pid`, `.qemu-serial.log`) live in the working directory.
+- Only one emulator instance per directory.
