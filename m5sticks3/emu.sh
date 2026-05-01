@@ -15,9 +15,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 QEMU="${REPO_DIR}/build/qemu-system-xtensa"
 
-SOCK=".qemu.sock"
-PID_FILE=".qemu.pid"
-SERIAL_LOG=".qemu-serial.log"
+SOCK="${REPO_DIR}/.qemu.sock"
+PID_FILE="${REPO_DIR}/.qemu.pid"
+SERIAL_LOG="${REPO_DIR}/.qemu-serial.log"
 FLASH_SIZE=8388608  # 8MB
 
 # --- helpers ---
