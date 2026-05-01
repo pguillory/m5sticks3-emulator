@@ -73,11 +73,23 @@ is_merged_flash_image() {
 # Auto-detects whether the input is a merged flash image or an app-only binary.
 prepare_flash() {
     local src="$1" dst="$2"
-    # Create 8MB zero-filled image
+    # Create 8MB zero-filled image.
+    # Note: we use zeros (not 0xFF) deliberately. The ESP-IDF bootloader
+    # hangs when the OTA data partition (typically at 0xE000) is all 0xFF —
+    # it enters a code path that never completes. With zeros, the bootloader
+    # correctly identifies "ota data partition invalid" and falls through to
+    # trying all app partitions. The merged firmware image already contains
+    # 0xFF in its erased NVS/OTA areas, so the dd overlay produces the right
+    # mix: firmware data where it exists, zeros elsewhere.
     dd if=/dev/zero of="$dst" bs=1048576 count=8 2>/dev/null
     if is_merged_flash_image "$src"; then
         # Merged image: copy as-is at offset 0
         dd if="$src" of="$dst" bs=4096 conv=notrunc 2>/dev/null
+        # Zero out OTA data partition to prevent bootloader hang.
+        # When OTA data is all 0xFF (as in the merged image), the ESP-IDF
+        # bootloader stalls. Zeroing it forces the "invalid, try all
+        # partitions" fallback path which boots correctly.
+        dd if=/dev/zero of="$dst" bs=1 count=8192 seek=$((0xE000)) conv=notrunc 2>/dev/null
     else
         # App-only binary: place at 0x10000 (no bootloader/partition table)
         echo "Warning: firmware appears to be app-only (no partition table at 0x8000)."
