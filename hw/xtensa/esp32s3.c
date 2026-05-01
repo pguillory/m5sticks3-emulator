@@ -1317,6 +1317,7 @@ static void esp32s3_machine_init(MachineState *machine)
         DeviceState *spi3_master = DEVICE(&ss->gpspi[1]);
         BusState *spi3_bus = qdev_get_child_bus(spi3_master, "spi");
         DeviceState *st7789 = qdev_new(TYPE_ST7789V2);
+        st7789->id = g_strdup("st7789v2");
         qdev_realize(st7789, spi3_bus, &error_fatal);
 
         /* CS connection removed: the ST7789V2 uses SSI_CS_NONE because

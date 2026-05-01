@@ -49,16 +49,41 @@ qmp_cmd() {
     require_running
     local cmd="$1"
     # greeting → capabilities → command → read response
-    printf '%s\n%s\n' '{"execute":"qmp_capabilities"}' "$cmd" \
-        | socat - UNIX-CONNECT:"$SOCK" 2>/dev/null \
-        | tail -1
+    # Use -t2 to wait up to 2s for response after sending commands
+    {
+        printf '%s\n%s\n' '{"execute":"qmp_capabilities"}' "$cmd"
+        sleep 2
+    } | socat -t2 STDIO UNIX-CONNECT:"$SOCK" 2>/dev/null \
+        | grep -v '"QMP"' | grep -v '"qmp_capabilities"' | tail -1
 }
 
-# Prepare a padded flash image from a raw firmware binary.
+# Detect whether a binary is a merged flash image (has partition table at 0x8000).
+is_merged_flash_image() {
+    local src="$1"
+    local file_size
+    file_size=$(stat -f%z "$src" 2>/dev/null || stat -c%s "$src" 2>/dev/null)
+    # Must be at least 0x8002 bytes to check partition table magic
+    [ "$file_size" -ge 32770 ] || return 1
+    # ESP partition table entries start with magic bytes 0xAA 0x50
+    local magic; magic=$(xxd -s 0x8000 -l 2 -p "$src")
+    [ "$magic" = "aa50" ]
+}
+
+# Prepare a padded flash image from a firmware binary.
+# Auto-detects whether the input is a merged flash image or an app-only binary.
 prepare_flash() {
     local src="$1" dst="$2"
-    dd if=/dev/zero of="$dst" bs=1 count=$FLASH_SIZE 2>/dev/null
-    dd if="$src" of="$dst" bs=1 seek=65536 conv=notrunc 2>/dev/null
+    # Create 8MB zero-filled image
+    dd if=/dev/zero of="$dst" bs=1048576 count=8 2>/dev/null
+    if is_merged_flash_image "$src"; then
+        # Merged image: copy as-is at offset 0
+        dd if="$src" of="$dst" bs=4096 conv=notrunc 2>/dev/null
+    else
+        # App-only binary: place at 0x10000 (no bootloader/partition table)
+        echo "Warning: firmware appears to be app-only (no partition table at 0x8000)."
+        echo "         For full boot, provide a merged flash image."
+        dd if="$src" of="$dst" bs=4096 seek=16 conv=notrunc 2>/dev/null
+    fi
 }
 
 # --- subcommands ---
@@ -91,7 +116,8 @@ cmd_screenshot() {
     local out="${1:-.qemu-screen.ppm}"
     # screendump needs an absolute path
     [[ "$out" != /* ]] && out="$PWD/$out"
-    local resp; resp=$(qmp_cmd "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"$out\"}}")
+    # Target the ST7789V2 display device specifically (not the default console)
+    local resp; resp=$(qmp_cmd "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"$out\",\"device\":\"st7789v2\"}}")
     if echo "$resp" | grep -q '"return"'; then
         echo "$out"
     else
