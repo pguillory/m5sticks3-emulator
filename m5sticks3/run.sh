@@ -32,16 +32,22 @@ PSRAM_SIZE=8  # in MB
 # Valid flash sizes in bytes (2MB, 4MB, 8MB, 16MB)
 VALID_FLASH_SIZES=(2097152 4194304 8388608 16777216)
 
-# Pad a flash image file to the nearest valid flash size
+# Pad a flash image file to the device flash size (or larger if needed)
 pad_flash_image() {
     local file="$1"
     local file_size
     file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
 
-    # Find the smallest valid size >= file_size
+    # Find the smallest valid size that is >= both the file size and FLASH_SIZE.
+    # The device has a fixed flash size (FLASH_SIZE), so the image must be at
+    # least that large for QEMU to select the correct flash chip model.
+    local min_size=$FLASH_SIZE
+    if [ "$file_size" -gt "$min_size" ]; then
+        min_size=$file_size
+    fi
     local target_size=0
     for vs in "${VALID_FLASH_SIZES[@]}"; do
-        if [ "$file_size" -le "$vs" ]; then
+        if [ "$min_size" -le "$vs" ]; then
             target_size=$vs
             break
         fi
