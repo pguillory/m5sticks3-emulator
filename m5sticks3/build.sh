@@ -21,6 +21,7 @@ if [ ! -f "${BUILD_DIR}/build.ninja" ]; then
         --target-list=xtensa-softmmu \
         --prefix="${REPO_DIR}/install" \
         --enable-sdl \
+        --enable-gcrypt \
         --disable-werror
 fi
 
