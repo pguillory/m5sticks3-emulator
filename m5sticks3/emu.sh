@@ -178,7 +178,6 @@ cmd_start() {
         -display none \
         -serial file:"$SERIAL_LOG" \
         -qmp unix:"$SOCK",server,wait=off \
-        -icount shift=4,align=off,sleep=on \
         -daemonize \
         -pidfile "$PID_FILE"
 
