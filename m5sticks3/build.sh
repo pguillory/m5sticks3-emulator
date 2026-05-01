@@ -12,6 +12,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${REPO_DIR}/build"
 
+# Ensure CC/CXX point to real compilers, not shell aliases.
+# (Some users alias 'cc' to other tools, which breaks configure.)
+if [ -z "${CC:-}" ]; then
+    if [ -x /usr/bin/cc ]; then
+        export CC=/usr/bin/cc
+    elif command -v gcc >/dev/null 2>&1; then
+        export CC=gcc
+    fi
+fi
+if [ -z "${CXX:-}" ]; then
+    if [ -x /usr/bin/c++ ]; then
+        export CXX=/usr/bin/c++
+    elif command -v g++ >/dev/null 2>&1; then
+        export CXX=g++
+    fi
+fi
+
 cd "$REPO_DIR"
 
 # Configure if not already done
