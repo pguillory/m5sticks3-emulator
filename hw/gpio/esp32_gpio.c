@@ -16,6 +16,8 @@
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "qapi/qapi-commands-misc.h"
+#include "qom/object.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
@@ -587,3 +589,34 @@ static void esp32_gpio_register_types(void)
 }
 
 type_init(esp32_gpio_register_types)
+
+
+/*
+ * QMP command handler: x-gpio-set-pin
+ *
+ * Allows external tools to inject GPIO pin state changes (e.g. button
+ * presses) via the QEMU Machine Protocol.
+ */
+void qmp_x_gpio_set_pin(int64_t pin, int64_t level, Error **errp)
+{
+    Object *obj = object_resolve_path("/machine/soc/gpio", NULL);
+    if (!obj) {
+        error_setg(errp, "GPIO device not found at /machine/soc/gpio");
+        return;
+    }
+
+    Esp32GpioState *gpio = ESP32_GPIO(obj);
+
+    if (pin < 0 || pin >= ESP32_GPIO_MAX_COUNT) {
+        error_setg(errp, "GPIO pin %" PRId64 " out of range (0-%d)",
+                   pin, ESP32_GPIO_MAX_COUNT - 1);
+        return;
+    }
+
+    if (level != 0 && level != 1) {
+        error_setg(errp, "level must be 0 or 1, got %" PRId64, level);
+        return;
+    }
+
+    esp32_gpio_set_pin_level(gpio, (int)pin, (int)level);
+}

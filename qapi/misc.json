@@ -605,3 +605,31 @@
 { 'event': 'VFU_CLIENT_HANGUP',
   'data': { 'vfu-id': 'str', 'vfu-qom-path': 'str',
             'dev-id': 'str', 'dev-qom-path': 'str' } }
+
+##
+# @x-gpio-set-pin:
+#
+# Set the level of a GPIO input pin on the emulated ESP32 SoC.
+#
+# This is used to inject external signals such as button presses
+# into the emulated GPIO peripheral.
+#
+# @pin: GPIO pin number (0-48)
+#
+# @level: Pin level: 0 for LOW, 1 for HIGH
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 9.2
+#
+# .. qmp-example::
+#
+#     -> { "execute": "x-gpio-set-pin",
+#          "arguments": { "pin": 11, "level": 0 } }
+#     <- { "return": {} }
+##
+{ 'command': 'x-gpio-set-pin',
+  'data': { 'pin': 'int', 'level': 'int' },
+  'features': [ 'unstable' ] }

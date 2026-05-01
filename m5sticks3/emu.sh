@@ -109,15 +109,23 @@ cmd_press() {
         *) die "unknown button '$btn' (use btnA or btnB)" ;;
     esac
 
-    # NOTE: Standard QMP has no GPIO-write command. This would require either:
-    #   1. A custom QMP/HMP command added to the QEMU fork (e.g. "gpio-set-pin")
-    #   2. Writing to the MMIO register (GPIO_BASE+0x3C = 0x6000403C) via GDB
-    # For now we attempt the human-monitor-command path, which won't work until
-    # a custom HMP command is added. Leaving the plumbing in place.
-    echo "press $btn (GPIO $pin): not yet supported via QMP"
-    echo "Requires a custom 'gpio-set-pin' QMP command in the QEMU fork."
-    echo "See ui/sdl2-m5sticks3.c:m5sticks3_set_button() for the internal API."
-    return 1
+    # Press: drive pin LOW (active-low buttons)
+    local resp
+    resp=$(qmp_cmd "{\"execute\":\"x-gpio-set-pin\",\"arguments\":{\"pin\":$pin,\"level\":0}}")
+    if ! echo "$resp" | grep -q '"return"'; then
+        die "press failed: $resp"
+    fi
+
+    # Hold for 100ms
+    sleep 0.1
+
+    # Release: drive pin HIGH
+    resp=$(qmp_cmd "{\"execute\":\"x-gpio-set-pin\",\"arguments\":{\"pin\":$pin,\"level\":1}}")
+    if ! echo "$resp" | grep -q '"return"'; then
+        die "release failed: $resp"
+    fi
+
+    echo "pressed $btn (GPIO $pin)"
 }
 
 cmd_serial() {
