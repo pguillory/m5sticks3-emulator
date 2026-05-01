@@ -24,6 +24,9 @@ This document covers the chip architecture, the M5StickS3 board design, how each
 14. [Peripheral Reference Table](#peripheral-reference-table)
 15. [Debugging Cookbook](#debugging-cookbook)
 16. [Running the Emulator](#running-the-emulator)
+17. [Headless CLI Reference](#headless-cli-reference)
+18. [Headless Development Workflow](#headless-development-workflow)
+19. [Known Limitations](#known-limitations)
 
 ---
 
@@ -575,45 +578,57 @@ M5Unified's `_check_boardtype()` runs at startup to identify which M5Stack board
 
 ### Detection Flow
 
+The detection is a two-stage process. M5GFX detects the display first (using I2C hardware), then M5Unified's `_check_boardtype()` refines or overrides the result (using bit-bang I2C on GPIO).
+
 ```
-M5Unified::begin()
-    │
+M5GFX::autodetect()               M5Unified::begin()
+    │                                   │
+    ├── Reads eFuse PKG_VERSION         ▼
+    │   pkg_ver == 1 → LGA56 path  auto board = _check_boardtype(Display.getBoard())
+    │                                   │
+    ▼ (LGA56 path)                      ├── If board != unknown → skip detection
+    Reads GPIO 47/48 (pull-up check)    │   (M5GFX already identified it)
+    │                                   │
+    ├── Both HIGH → I2C bus present     └── If board == unknown → own I2C probing
+    │                                       (bit-bang GPIO, fallback detection)
     ▼
-_check_boardtype()
+    I2C1 read: M5PM1 at 0x6E, reg 0x00
     │
-    ├── Reads eFuse PKG_VERSION
-    │   pkg_ver == 1 → PICO/LGA56 path
-    │   pkg_ver == 0 → QFN56 path
+    ├── has_value() → board_M5StickS3 (26)
+    │   + configures LCD power via M5PM1 GPIO2
+    │   + initializes ST7789 display
     │
-    ▼ (PICO path)
-Probes I2C for known devices:
-    │
-    ├── 0x6E (M5PM1) → ACK? → M5StickS3 candidate
-    ├── 0x34 (AXP2101) → ACK? → different PICO board
-    └── GPIO probing for button presence
-    │
-    ▼
-Returns board type ID
+    └── no value → continues checking other boards
 ```
 
 ### Board IDs (relevant subset)
 
 | ID | Board |
 |----|-------|
-| 146 | M5PowerHub (may be default/fallback for PICO path) |
-| ??? | M5StickS3 |
+| 26 | M5StickS3 (display board) |
+| 137 | M5AtomS3Lite (ESP32-S3 fallback) |
+| 146 | M5PowerHub (QFN56 non-display board) |
 
-**Current status:** Despite eFuse PKG_VERSION being correctly set to 1, M5Unified still reports `board:146`. However, M5GFX has its own *separate* display detection path that independently checks pkg_ver and probes I2C address 0x6E. The display may initialize correctly even when the board type is wrong.
+**Current status:** Board detection works correctly. M5GFX's `autodetect()` reads eFuse PKG_VERSION=1, enters the LGA56/PICO path, reads M5PM1 device ID via I2C1 hardware, and returns `board_M5StickS3` (26). M5Unified receives this from `Display.getBoard()` and preserves it.
 
-### What M5GFX Checks Separately
+**History:** Before the I2C opcode fix (commit 725634402e), the I2C READ/STOP opcodes used ESP32 values instead of ESP32-S3 values. This caused I2C transactions with M5PM1 to fail, M5GFX returned `board_unknown`, and `_check_boardtype()` fell through to incorrect fallback detection.
 
-M5GFX's `autodetect()` for display configuration:
-1. Reads `PKG_VERSION` from eFuses
-2. If pkg_ver == 1: probes I2C address 0x6E for M5PM1
-3. If M5PM1 found: configures ST7789 display with M5StickS3 parameters (135×240, SPI3, pin assignments)
-4. Initializes the display driver
+### How M5GFX Detection Works
 
-This is why the display pipeline can work even if `_check_boardtype()` returns the wrong board ID — the display path is independent.
+M5GFX's `autodetect()` for display configuration (pkg_ver == 1 path):
+1. Reads `PKG_VERSION` from eFuses → must be 1 (LGA56/PICO)
+2. Reads GPIO 47 and 48 with internal pull-down → both must read HIGH (external I2C pull-ups present)
+3. Initializes I2C1 hardware peripheral (SDA=47, SCL=48)
+4. Reads M5PM1 register 0x00 at address 0x6E → must return a value (device ID 0x50)
+5. If M5PM1 found: sets `board_M5StickS3`, configures LCD power (M5PM1 GPIO2 HIGH), initializes ST7789
+
+### What the Emulator Provides
+
+Each step is handled by a specific emulator component:
+- **PKG_VERSION=1**: Set in `esp32s3_efuse.c` during device realize
+- **GPIO 47/48 HIGH**: GPIO model defaults all inputs to HIGH (`gpio_in1 = 0x0001FFFF`)
+- **I2C1 hardware**: `esp32_i2c.c` with correct ESP32-S3 opcodes (READ=3, STOP=2, RSTART=6)
+- **M5PM1 at 0x6E**: `m5pm1.c` attached to I2C1 bus, returns device ID 0x50 for register 0x00
 
 ---
 
@@ -882,3 +897,259 @@ The flash image is a raw binary matching the physical flash layout:
 | Variable | SPIFFS/LittleFS, coredump, etc. |
 
 Build the flash image with ESP-IDF or PlatformIO as normal, then pass it to QEMU.
+
+---
+
+## Headless CLI Reference
+
+The `m5sticks3/emu.sh` script provides headless control of the emulator via QMP (QEMU Machine Protocol). It launches QEMU as a daemon with no display window, communicating through a Unix socket for screenshots, button injection, and lifecycle management.
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `start <firmware.bin>` | Launch QEMU headless with QMP control socket |
+| `screenshot [output.ppm]` | Capture the ST7789V2 display to a PPM file |
+| `press <btnA\|btnB>` | Inject a button press (active-low pulse on GPIO) |
+| `serial` | Print accumulated serial output |
+| `stop` | Kill QEMU and clean up state files |
+| `status` | Show whether the emulator is running, report orphans |
+| `cleanup` | Kill everything — tracked instance and any orphans |
+
+### `start <firmware.bin>`
+
+Launches the emulator in the background with no display window. Accepts either a merged flash image (with bootloader + partition table) or an app-only binary:
+
+- **Merged flash image:** Detected by checking for partition table magic (`0xAA50`) at offset `0x8000`. Copied as-is into an 8 MB flash file. The OTA data partition at `0xE000` is zeroed to prevent a bootloader hang.
+- **App-only binary:** Placed at offset `0x10000` (the standard app partition start). No bootloader or partition table is present, so ROM boot falls back to trying all flash offsets.
+
+State files created:
+
+| File | Purpose |
+|------|---------|
+| `.qemu.sock` | QMP Unix socket for control commands |
+| `.qemu.pid` | PID of the daemonized QEMU process |
+| `.qemu-serial.log` | UART0 serial output (file-backed) |
+
+QEMU is launched with `-icount shift=4,align=off,sleep=on` for deterministic instruction counting. This makes execution reproducible but significantly slower than real-time — see [Known Limitations](#known-limitations).
+
+If a previous instance left stale state (dead PID file, orphaned socket), `start` cleans it up automatically before launching.
+
+### `screenshot [output.ppm]`
+
+Captures the current ST7789V2 display contents via QMP `screendump`. Defaults to `.qemu-screen.ppm` if no output path is given.
+
+```bash
+m5sticks3/emu.sh screenshot              # → .qemu-screen.ppm
+m5sticks3/emu.sh screenshot /tmp/ui.ppm  # → /tmp/ui.ppm
+```
+
+The screendump targets the `st7789v2` device specifically (not the default QEMU console). The output is a raw PPM image at 240×320 resolution — the full ST7789 framebuffer including the offset region. The M5StickS3's visible area is the 135×240 pixel region starting at (52, 40).
+
+**Requires `socat`** for Unix socket communication.
+
+### `press <btnA|btnB>`
+
+Injects a button press by driving the corresponding GPIO pin low (press), waiting 100 ms, then driving it high (release).
+
+| Button | GPIO Pin | Physical Location |
+|--------|----------|-------------------|
+| btnA | 11 | Front blue button |
+| btnB | 12 | Side button |
+
+Accepts case-insensitive variants: `btnA`, `btna`, `a`, `A` (and likewise for B).
+
+```bash
+m5sticks3/emu.sh press btnA   # Front button
+m5sticks3/emu.sh press b      # Side button
+```
+
+**How button injection works:** The M5StickS3's buttons are wired directly to ESP32-S3 GPIO pins 11 and 12 — they are *not* routed through the PMIC or any I2C expander. The buttons are active-low: the GPIO reads HIGH (1) when released and LOW (0) when pressed, with internal pull-ups.
+
+The QMP command `x-gpio-set-pin` is a custom extension that:
+1. Clears the `gpio_enable` bit for the target pin (forces input mode, overriding any firmware output configuration)
+2. Sets or clears the corresponding bit in `gpio_in` (the input register the firmware reads)
+
+This is necessary because the emulator's GPIO model defaults all pins as outputs. Without clearing `gpio_enable` first, the injected value in `gpio_in` would be masked by the output driver.
+
+### `serial`
+
+Dumps the contents of `.qemu-serial.log` — everything UART0 has printed since boot. This includes ESP-IDF bootloader messages, application `printf`/`ESP_LOG` output, and crash backtraces.
+
+```bash
+m5sticks3/emu.sh serial | grep "display"
+m5sticks3/emu.sh serial | tail -20
+```
+
+### `stop`
+
+Sends SIGTERM to the tracked QEMU process, waits up to 5 seconds for graceful exit, escalates to SIGKILL if needed. Also kills any orphaned QEMU processes from this repo. Removes all state files (`.qemu.sock`, `.qemu.pid`, `.qemu-serial.log`).
+
+### `status`
+
+Reports whether the emulator is running (live PID) or not (no PID file, or stale PID). Also scans for orphaned `qemu-system-xtensa` processes launched from this build directory that lost their PID file.
+
+```
+$ m5sticks3/emu.sh status
+Emulator is running (PID 12345)
+
+$ m5sticks3/emu.sh status
+Emulator is NOT running (no PID file)
+  Orphaned QEMU process: PID 67890
+Found 1 orphaned QEMU process(es) — run 'emu.sh cleanup' to kill them
+```
+
+### `cleanup`
+
+Nuclear option. Stops the tracked instance (if any), kills all orphaned QEMU processes from this repo, and removes all state files. Use this when things get confused — e.g., after a session crash that left QEMU running without a PID file.
+
+---
+
+## Headless Development Workflow
+
+The headless CLI enables a full firmware development loop without a display server or physical device:
+
+```
+Compile → Start → Wait → Screenshot → Interact → Inspect → Stop
+```
+
+### Step by Step
+
+**1. Compile firmware**
+
+Build with PlatformIO (or ESP-IDF directly). The merged flash image is the preferred input:
+
+```bash
+cd /path/to/your-firmware-project
+pio run
+# Output: .pio/build/<env>/firmware.bin (merged flash image)
+```
+
+**2. Start the emulator**
+
+```bash
+m5sticks3/emu.sh start /path/to/firmware.bin
+# → "Emulator started (PID 12345)"
+```
+
+**3. Wait for boot**
+
+Under `icount shift=4`, boot takes significantly longer than real hardware. Typical timings:
+
+| Firmware complexity | Boot time (approximate) |
+|--------------------|------------------------|
+| Minimal (no WiFi, no crypto) | 15–20 seconds |
+| Standard M5Unified app | 25–35 seconds |
+| WiFi-enabled (with phy_init) | 45–60+ seconds |
+
+Monitor progress via serial output:
+
+```bash
+# Watch for boot completion markers
+m5sticks3/emu.sh serial | tail -5
+```
+
+Look for indicators like `M5Unified::begin()` completing, display init messages, or your application's startup log.
+
+**4. Take a screenshot**
+
+```bash
+m5sticks3/emu.sh screenshot /tmp/display.ppm
+# → "/tmp/display.ppm"
+open /tmp/display.ppm   # macOS: opens in Preview
+```
+
+Take multiple screenshots over time to observe display state changes.
+
+**5. Interact with buttons**
+
+```bash
+m5sticks3/emu.sh press btnA
+sleep 2                          # Let firmware process the event
+m5sticks3/emu.sh screenshot /tmp/after-press.ppm
+```
+
+**6. Read serial output**
+
+```bash
+m5sticks3/emu.sh serial         # Full output
+m5sticks3/emu.sh serial | grep -i error   # Filter for errors
+```
+
+**7. Stop when done**
+
+```bash
+m5sticks3/emu.sh stop
+# → "Emulator stopped (was PID 12345)"
+```
+
+### Scripted Testing
+
+The headless interface is designed for automation. Example test script:
+
+```bash
+#!/bin/bash
+set -e
+
+m5sticks3/emu.sh start .pio/build/m5sticks3/firmware.bin
+sleep 30   # Wait for boot
+
+# Verify display shows expected content
+m5sticks3/emu.sh screenshot /tmp/boot-screen.ppm
+
+# Simulate user interaction
+m5sticks3/emu.sh press btnA
+sleep 2
+m5sticks3/emu.sh screenshot /tmp/after-btn.ppm
+
+# Check serial for errors
+if m5sticks3/emu.sh serial | grep -qi "guru meditation\|abort\|panic"; then
+    echo "FAIL: firmware crashed"
+    m5sticks3/emu.sh stop
+    exit 1
+fi
+
+m5sticks3/emu.sh stop
+echo "PASS"
+```
+
+---
+
+## Known Limitations
+
+### Boot Speed Under icount
+
+The `-icount shift=4` flag enables deterministic instruction counting, which is required for reproducible behavior but makes execution ~10–50× slower than real hardware. Crypto-heavy boot phases (secure boot verification, WiFi PHY calibration) are particularly affected because they perform millions of hash/AES operations that on real hardware complete in hardware accelerator cycles.
+
+There is no workaround short of disabling icount (which sacrifices determinism). For iterative development, consider firmware that skips WiFi init at boot.
+
+### WiFi Requires ELF Loading
+
+WiFi functionality only works when loading firmware via `-kernel firmware.elf`. The ELF loader patches WiFi API entry points with SIMCALL trampolines that intercept calls to the proprietary WiFi blob and route them through the emulated OpenCores Ethernet NIC.
+
+With raw flash images, the proprietary WiFi blob runs natively on the emulated CPU and tries to talk to radio hardware (FE/FE2 registers) that isn't fully emulated. The catch-all's toggle strategy gets the calibration to complete, but actual packet TX/RX doesn't work.
+
+### BLE is macOS-Only
+
+BLE emulation uses the host's Bluetooth stack via macOS CoreBluetooth APIs. It's not available on Linux. Like WiFi, it requires ELF loading for the API interception trampolines.
+
+### QMP Responsiveness During Boot
+
+QMP commands (`screenshot`, `press`) can be slow or unresponsive during CPU-intensive boot phases. The QMP socket is serviced by QEMU's main loop, which yields to guest CPU execution. During long-running computations (e.g., secure boot hash verification), the main loop may not run for several seconds.
+
+**Workaround:** If a QMP command times out, wait a few seconds and retry. The `socat` timeout in `emu.sh` is set to 2 seconds — if QEMU is deep in a computation, this may not be enough. The command isn't lost; it will execute when the main loop next runs.
+
+### Screenshot Timing
+
+The `screendump` command captures whatever is in the ST7789V2's framebuffer at the moment the command executes. If firmware is in the middle of a multi-transaction screen update (e.g., drawing line by line), you may capture a partially-rendered frame. There is no vsync or "frame complete" signal — the display updates incrementally as SPI transactions arrive.
+
+### Flash Image vs. ELF Trade-offs
+
+| Feature | Flash Image | ELF |
+|---------|-------------|-----|
+| Boot path | Full ROM → bootloader → app | Direct to entry point |
+| WiFi | Calibration runs, but no packets | Works (API interception) |
+| BLE | Not functional | Works (macOS only) |
+| Boot time | Longer (ROM + 2nd stage) | Shorter |
+| Fidelity | Higher (real boot sequence) | Lower (skips ROM) |
+| NVS | Works (flash-backed) | Not available |
