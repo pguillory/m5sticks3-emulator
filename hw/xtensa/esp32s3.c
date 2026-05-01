@@ -206,8 +206,10 @@ typedef struct Esp32s3SocState {
 
     uint32_t requested_reset;
 
-    /* Debug: periodic PC trace timer */
+    /* Debug: periodic PC trace timer (virtual clock for tight loop detection) */
     QEMUTimer *pc_trace_timer;
+    /* Backup realtime timer for abort handler detection during CPU halts */
+    QEMUTimer *pc_trace_rt_timer;
 } Esp32s3SocState;
 
 
@@ -498,7 +500,35 @@ static void esp32s3_init_openeth(Esp32s3SocState *ms)
 /* Debug: global for QEMU timer access */
 static Esp32s3SocState *g_debug_soc = NULL;
 
-/* Debug timer: log current PC every second to track boot progress */
+/*
+ * Shared abort handler detection logic, called from both timer callbacks.
+ * Returns true if the abort handler was detected and cleared.
+ */
+static bool esp32s3_check_abort_handler(Esp32s3SocState *s)
+{
+    CPUXtensaState *env = &s->cpu[0].env;
+    uint32_t pc = env->pc;
+
+    /* The ESP32-S3 ROM abort handler at 0x40006fcb polls a RAM flag
+     * at 0x3fcef9e4 waiting for a system restart that never comes
+     * (because the WDT reset isn't emulated). Clear the flag to let
+     * execution continue past the abort handler. */
+    if (pc == 0x40006fcb) {
+        CPUState *cs = env_cpu(env);
+        uint32_t zero = 0;
+        cpu_memory_rw_debug(cs, 0x3fcef9e4, (uint8_t *)&zero, 4, true);
+        warn_report("[PC-TRACE] Cleared abort spin-loop flag at 0x3fcef9e4");
+        cpu_exit(cs);
+        return true;
+    }
+    return false;
+}
+
+/*
+ * Boot progress timer (virtual clock): fires at TB boundaries during CPU
+ * execution. Good for detecting tight loops but does NOT fire when the CPU
+ * is halted (WAITI), since virtual time doesn't advance while halted.
+ */
 static void esp32s3_pc_trace_timer(void *opaque)
 {
     Esp32s3SocState *s = (Esp32s3SocState *)opaque;
@@ -509,21 +539,10 @@ static void esp32s3_pc_trace_timer(void *opaque)
 
     if (pc == last_pc) {
         same_count++;
-        if (same_count <= 3 || same_count % 10 == 0) {
+        if (same_count <= 5 || same_count % 20 == 0) {
             warn_report("[PC-TRACE] PC=0x%08x (same x%d)", pc, same_count);
         }
-
-        /* Detect ROM abort handler spin loop and break out of it.
-         * The ESP32-S3 ROM abort handler at 0x40006fcb polls a RAM flag
-         * at 0x3fcef9e4 waiting for a system restart that never comes
-         * (because the WDT reset isn't emulated). Clear the flag to let
-         * execution continue past the abort handler. */
-        if (pc == 0x40006fcb && same_count >= 3) {
-            CPUState *cs = env_cpu(env);
-            uint32_t zero = 0;
-            cpu_memory_rw_debug(cs, 0x3fcef9e4, (uint8_t *)&zero, 4, true);
-            warn_report("[PC-TRACE] Cleared abort spin-loop flag at 0x3fcef9e4");
-        }
+        esp32s3_check_abort_handler(s);
     } else {
         if (same_count > 1) {
             warn_report("[PC-TRACE] PC=0x%08x (was 0x%08x x%d)", pc, last_pc, same_count);
@@ -534,9 +553,25 @@ static void esp32s3_pc_trace_timer(void *opaque)
         last_pc = pc;
     }
 
-    /* Reschedule in 1 second */
+    /* Reschedule every 50ms of virtual time */
     timer_mod(s->pc_trace_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 50);
+}
+
+/*
+ * Backup realtime timer: fires based on wall clock, independent of CPU state.
+ * Essential for detecting spin loops when the CPU is in a tight RAM-only loop
+ * where MMIO callbacks don't trigger and virtual time barely advances.
+ * Also provides the fallback for WAITI states where virtual time is frozen.
+ */
+static void esp32s3_pc_trace_rt_timer(void *opaque)
+{
+    Esp32s3SocState *s = (Esp32s3SocState *)opaque;
+    esp32s3_check_abort_handler(s);
+
+    /* Reschedule every 500ms of real time */
+    timer_mod(s->pc_trace_rt_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 500);
 }
 
 static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
@@ -1603,11 +1638,18 @@ static void esp32s3_machine_init(MachineState *machine)
 
     /* Heartbeat check is done inline in IO read handlers now */
 
-    /* Start debug PC trace timer (logs PC every second using real-time clock) */
-    ss->pc_trace_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+    /* Start boot progress timers:
+     * - Virtual clock timer fires at TB boundaries (detects tight loops)
+     * - Realtime timer fires on wall clock (backup for halted/WAITI states) */
+    ss->pc_trace_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                        esp32s3_pc_trace_timer, ss);
     timer_mod(ss->pc_trace_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 2000);
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+
+    ss->pc_trace_rt_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                          esp32s3_pc_trace_rt_timer, ss);
+    timer_mod(ss->pc_trace_rt_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 500);
 
     g_debug_soc = ss;
 }
