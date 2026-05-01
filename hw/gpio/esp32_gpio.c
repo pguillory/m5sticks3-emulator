@@ -596,6 +596,10 @@ type_init(esp32_gpio_register_types)
  *
  * Allows external tools to inject GPIO pin state changes (e.g. button
  * presses) via the QEMU Machine Protocol.
+ *
+ * This forces the pin into input mode (clears gpio_enable) so the injected
+ * level is what firmware reads from GPIO_IN, regardless of whether the
+ * firmware previously configured the pin as output.
  */
 void qmp_x_gpio_set_pin(int64_t pin, int64_t level, Error **errp)
 {
@@ -616,6 +620,18 @@ void qmp_x_gpio_set_pin(int64_t pin, int64_t level, Error **errp)
     if (level != 0 && level != 1) {
         error_setg(errp, "level must be 0 or 1, got %" PRId64, level);
         return;
+    }
+
+    /*
+     * Force the pin into input mode so the injected level takes effect.
+     * GPIO_IN returns gpio_out for output-enabled pins, which would mask
+     * our gpio_in injection. Clearing gpio_enable ensures GPIO_IN reflects
+     * the externally-driven level we're setting.
+     */
+    if ((int)pin < 32) {
+        gpio->gpio_enable &= ~(1u << (int)pin);
+    } else {
+        gpio->gpio_enable1 &= ~(1u << ((int)pin - 32));
     }
 
     esp32_gpio_set_pin_level(gpio, (int)pin, (int)level);

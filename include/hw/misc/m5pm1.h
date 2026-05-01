@@ -21,6 +21,7 @@
 #define M5PM1_REG_I2C_CONFIG      0x09  /* I2C configuration (0 = disable idle sleep) */
 #define M5PM1_REG_GPIO_DIR        0x10  /* GPIO direction (bit set = output) */
 #define M5PM1_REG_GPIO_OUT        0x11  /* GPIO output level (bit set = high) */
+#define M5PM1_REG_GPIO_IN         0x12  /* GPIO input / status (bit 0 = charge state) */
 #define M5PM1_REG_GPIO_OUT_MODE   0x13  /* GPIO output mode (bit clear = push-pull) */
 #define M5PM1_REG_GPIO_FUNC_SEL   0x16  /* GPIO function select (bit clear = GPIO) */
 

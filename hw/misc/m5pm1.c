@@ -35,6 +35,17 @@ static void m5pm1_reset_regs(M5PM1State *s)
     s->regs[M5PM1_REG_GPIO_OUT]      = 0x00;
     s->regs[M5PM1_REG_GPIO_OUT_MODE] = 0x00;
     s->regs[M5PM1_REG_GPIO_FUNC_SEL] = 0x00;
+
+    /*
+     * GPIO input / status register:
+     * Bit 0: charge state (1 = discharging / not charging)
+     * Other bits: GPIO input levels (default HIGH, not pressed)
+     *
+     * M5Unified reads this to check charging status:
+     *   reg_val & 0x01 ? is_discharging : is_charging
+     * Default to 0xFF (discharging, all GPIO inputs high).
+     */
+    s->regs[M5PM1_REG_GPIO_IN] = 0xFF;
 }
 
 
