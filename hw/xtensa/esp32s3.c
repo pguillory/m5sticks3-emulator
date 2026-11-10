@@ -125,8 +125,8 @@ static const struct MemmapEntry {
 #define ESP32S3_SOC_RESET_ALL       (ESP32S3_SOC_RESET_RTC | ESP32S3_SOC_RESET_DIG)
 
 #define ESP32S3_IO_WARNING  0
-#define ESP32S3_IO_STALL_DETECT  0
-#define ESP32S3_HEARTBEAT  0
+#define ESP32S3_IO_STALL_DETECT  1
+#define ESP32S3_HEARTBEAT  1
 
 typedef struct Esp32s3SocState {
     /*< private >*/

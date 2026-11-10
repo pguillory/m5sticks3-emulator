@@ -20,7 +20,7 @@
 #include "hw/xtensa/esp32s3_clk.h"
 #include "hw/xtensa/esp32s3_clk_defs.h"
 
-#define CLOCK_DEBUG      0
+#define CLOCK_DEBUG      1
 #define CLOCK_WARNING    0
 
 static uint32_t esp32s3_read_cpu_intr(ESP32S3ClockState *s, uint32_t index)
