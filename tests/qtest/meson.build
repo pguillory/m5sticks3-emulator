@@ -275,6 +275,10 @@ qtests_riscv32 = \
 qtests_riscv64 = \
   (unpack_edk2_blobs ? ['bios-tables-test'] : [])
 
+qtests_xtensa = \
+  ['esp32s3_gpio-test',
+   'esp32s3_st7789v2-test']
+
 qos_test_ss = ss.source_set()
 qos_test_ss.add(
   'ac97-test.c',
